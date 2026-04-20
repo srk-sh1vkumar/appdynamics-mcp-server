@@ -1,0 +1,314 @@
+# AppDynamics MCP Server - Enhancement Tracker
+# Version: 1.0
+# Date: 2026-04-12
+
+project_name: "AppDynamics MCP Server"
+project_tag: "appdynamics_mcp"
+version: "1.0.0"
+owner: "Development Team"
+integration_tag: "appdynamics_mcp"
+
+# Project Summary
+summary:
+  purpose: "Production-grade MCP server enabling fully autonomous APM incident investigation via AppDynamics"
+  transport: "stdio (MCP protocol)"
+  tools_count: 29
+  language: "Python 3.13+"
+  package_manager: "uv"
+  total_files: 43
+
+# Enhancement Tracking
+enhancements:
+
+  # ============================================================================
+  # PHASE 1: CORE BUILD (Complete)
+  # ============================================================================
+
+  - id: "001"
+    title: "Initial Project Build — Full 35-File Production Server"
+    category: "Core Build"
+    priority: "High"
+    status: "Complete"
+    impact: "Fully autonomous AppDynamics APM investigation via MCP — 28 tools, multi-controller, zero human intervention"
+    estimated_hours: 10
+    actual_hours: 10
+    completion_percentage: 100
+    completion_date: "2026-04-12"
+    dependencies: []
+    technical_summary: |
+      Full production build of the AppDynamics MCP server in Python 3.11+.
+      Covers: multi-controller OAuth2, two-layer cache (TTLCache + diskcache),
+      token-bucket rate limiter (global + per-user), PII redaction, prompt
+      injection protection, multi-language stack trace parsing (Java/Node/Python/.NET),
+      smoking gun root cause analysis, golden baseline auto-selection, license
+      detection with graceful degradation, K8s liveness probe, audit log, and
+      SIGTERM/SIGINT graceful shutdown.
+    deliverables:
+      - "main.py — FastMCP server with 28 tools and 16-step autonomous investigation system prompt"
+      - "models/types.py — Full type system (enums, dataclasses, Pydantic models)"
+      - "utils/ — cache.py, rate_limiter.py, sanitizer.py, timezone.py"
+      - "auth/ — vault_client.py (Mock + HashiCorp), appd_auth.py (TokenManager + RBAC)"
+      - "client/appd_client.py — httpx async client with retry, 401/403 handling"
+      - "parsers/ — snapshot_parser.py + 4 language stack parsers"
+      - "services/ — bt_classifier.py, license_check.py, runbook_generator.py, health.py"
+      - "tests/ — conftest.py, mocks/appd_server.py, 4 unit test files"
+      - "Dockerfile — multi-stage alpine, non-root user"
+      - "README.md — full setup guide with Vault, K8s, Claude Desktop, Cursor configs"
+    success_criteria:
+      - "✅ All 17 modules import cleanly"
+      - "✅ All 28 tool functions present in main.py"
+      - "✅ Multi-language stack trace parsing (Java, Node.js, Python, .NET)"
+      - "✅ License gating with graceful degradation (EUM, Analytics, Snapshots, DB Visibility)"
+      - "✅ Two-layer cache with UPN-namespaced keys"
+      - "✅ Token-bucket rate limiter (global 10 req/s, per-user 5 req/s)"
+      - "✅ PII redaction (email, JWT, Bearer, 16-digit card)"
+      - "✅ K8s liveness probe on port 8080"
+      - "✅ Dockerfile with non-root mcp user"
+    completion_notes:
+      - "Built across two sessions (April 2026)"
+      - "Full import verification passed: uv run python -c 'import main'"
+      - "All 28 tools confirmed present via introspection"
+      - "diskcache + cachetools two-layer cache persists across restarts"
+      - "MockVaultClient reads env vars in dev; HashiCorpVaultClient for prod"
+
+  # ============================================================================
+  # PHASE 2: PLANNED ENHANCEMENTS
+  # ============================================================================
+
+  - id: "002"
+    title: "Test Suite Execution & Coverage Report"
+    category: "Quality"
+    priority: "High"
+    status: "Complete"
+    impact: "Validate parser logic, BT classification, sanitizer, and tool error handling"
+    estimated_hours: 3
+    actual_hours: 4
+    completion_percentage: 100
+    completion_date: "2026-04-12"
+    dependencies:
+      - yaml_id: "001"
+        note: "Requires Phase 1 build"
+    technical_summary: |
+      Run pytest suite (4 unit test files), fix any failures, generate coverage
+      report, target >80% coverage on parsers and services modules.
+    success_criteria:
+      - "✅ All 121 unit tests pass (pytest tests/unit/)"
+      - "✅ Coverage >80% on parsers/ (95-99%), services/, utils/sanitizer (98%)"
+      - "✅ No import errors in test files"
+    completion_notes:
+      - "121 tests pass, 0 failures (0.38s)"
+      - "63% total coverage; parsers 95-99%, sanitizer 98%, bt_classifier 100%"
+      - "Fixed: TTLCache dict-style assignment, dotnet regex for method args, stitch_async_trace per-app error handling"
+      - "Fixed: detect_language UNKNOWN for unrecognised traces, ParsedStack field names, callChain string normalisation"
+      - "Fixed: wrap_as_untrusted accepts Any, sanitize() returns str, patch target main.get_client"
+
+  - id: "003"
+    title: "Claude Desktop & Cursor Integration Testing"
+    category: "Integration"
+    priority: "High"
+    status: "Planned"
+    impact: "Validate end-to-end MCP tool invocation from real AI clients"
+    estimated_hours: 2
+    actual_hours: null
+    completion_percentage: 0
+    completion_date: null
+    dependencies:
+      - yaml_id: "001"
+        note: "Requires Phase 1 build"
+    technical_summary: |
+      Configure claude_desktop_config.json and .cursor/mcp.json, connect to a
+      staging AppDynamics controller, exercise all 28 tools via natural language
+      queries, validate audit log output and PII redaction.
+    success_criteria:
+      - "MCP server starts cleanly from Claude Desktop"
+      - "list_applications returns real data"
+      - "analyze_snapshot returns smoking gun report"
+      - "get_server_health shows healthy status"
+
+  - id: "004"
+    title: "Docker Build & K8s Deployment Validation"
+    category: "Infrastructure"
+    priority: "Medium"
+    status: "Complete"
+    impact: "Production readiness — containerised deployment with liveness probe"
+    estimated_hours: 2
+    actual_hours: 1
+    completion_percentage: 100
+    completion_date: "2026-04-12"
+    dependencies:
+      - yaml_id: "001"
+        note: "Requires Phase 1 build"
+    technical_summary: |
+      Build Docker image, verify non-root mcp user, test K8s liveness probe
+      on port 8080, validate SIGTERM graceful shutdown with in-flight request.
+    success_criteria:
+      - "✅ docker build completes without error (python:3.11-alpine, multi-stage)"
+      - "✅ Container runs as uid=1001(mcp) gid=1001(mcp)"
+      - "✅ curl localhost:8080/health returns {\"status\": \"ok\"}"
+      - "✅ SIGTERM logged: 'Received signal 15. Initiating graceful shutdown.'"
+    completion_notes:
+      - "Fixed critical bug: asyncio.run(startup()) closed event loop before mcp.run() started, killing liveness server task"
+      - "Fix: restructured main() to use mcp.run_stdio_async() in single event loop via asyncio.run(_main())"
+      - "Fixed misleading docstring and .env.example: env var prefix is APPDYNAMICS_ not SECRET_APPDYNAMICS_"
+      - "Docker credential store issue resolved by removing credsStore from ~/.docker/config.json"
+      - "Empty controllers.json ('{\"controllers\":[]}') allows startup without real AppD credentials"
+
+  - id: "005"
+    title: "Monitoring Hub Integration"
+    category: "Observability"
+    priority: "Low"
+    status: "Complete"
+    impact: "Unified observability — MCP server metrics visible in existing Grafana dashboards"
+    estimated_hours: 3
+    actual_hours: 1
+    completion_percentage: 100
+    completion_date: "2026-04-12"
+    dependencies:
+      - yaml_id: "001"
+        note: "Requires Phase 1 build"
+    technical_summary: |
+      Expose Prometheus /metrics endpoint (audit log counters, cache hit rate,
+      active_users, rate_limit_hits). Add scrape target to monitoring-hub
+      prometheus.yml. Create Grafana dashboard panel for AppDynamics MCP.
+    success_criteria:
+      - "✅ /metrics endpoint returns Prometheus text format on port 8080"
+      - "✅ /health liveness probe unchanged on same port"
+      - "✅ monitoring-hub prometheus.yml scrape target added"
+      - "✅ 10-panel Grafana dashboard created"
+      - "✅ 121 tests still passing after all wiring"
+    completion_notes:
+      - "utils/metrics.py — 7 metrics, thread-safe (threading.Lock), no external deps"
+      - "health.py HTTP server extended: /health → JSON, /metrics → Prometheus text"
+      - "audit_log() auto-wires metrics for all 28 tools — no per-tool changes"
+      - "cache.py get() auto-wires cache hit/miss counters"
+      - "Grafana dashboard uid: appd-mcp-server, 10 panels across 3 rows"
+
+  - id: "006"
+    title: "Production Caching Layer — Registries, Golden Baseline, Event-Driven Invalidation"
+    category: "Core Build"
+    priority: "High"
+    status: "Complete"
+    impact: "Eliminates redundant AppD API calls across incidents; golden baseline auto-selection survives restarts; deployment/restart events automatically invalidate stale data"
+    estimated_hours: 12
+    actual_hours: 12
+    completion_percentage: 100
+    completion_date: "2026-04-12"
+    dependencies:
+      - yaml_id: "001"
+        note: "Requires Phase 1 build"
+      - yaml_id: "002"
+        note: "Test suite must be green before adding new tests"
+    technical_summary: |
+      Full production caching layer on top of the existing two-layer cache.
+      New modules: utils/cache_keys.py (centralised UPN-namespaced key builder),
+      registries/apps_registry.py (AppEntry + AppsRegistry), registries/bt_registry.py
+      (BTEntry + BTRegistry), registries/golden_registry.py (GoldenSnapshot + GoldenRegistry,
+      24h TTL, shared across users), services/cache_invalidator.py (event-driven invalidation).
+      Extended utils/cache.py with TwoLayerCache class (per-data-type TTLCache L1 + diskcache L2,
+      Pydantic validation on every read, structural eviction of corrupt entries),
+      CachedSnapshotAnalysis model (parsed snapshot cached in-memory only, raw JSON never stored),
+      per-data-type stats (hit rate, misses, evictions). Added 29th tool set_golden_snapshot.
+      Wired deployment detection (BT count shift > 2) into get_business_transactions and
+      restart detection (APP_CRASH / NODE_RESTART) into get_health_violations.
+      Extended get_server_health with full cache + registry + invalidation stats.
+      All tooling aligned to Python 3.13 (ruff py313, mypy 3.13).
+    deliverables:
+      - "utils/cache_keys.py — centralised key builder (make_key, golden_key, snapshot_list_key, etc.)"
+      - "utils/cache.py — TwoLayerCache, CachedSnapshotAnalysis, per-type stats, NEVER_CACHE set"
+      - "registries/apps_registry.py — AppEntry + AppsRegistry"
+      - "registries/bt_registry.py — BTEntry + BTRegistry"
+      - "registries/golden_registry.py — GoldenSnapshot + GoldenRegistry"
+      - "services/cache_invalidator.py — CacheInvalidator (4 event handlers)"
+      - "tests/unit/test_cache.py — 47 tests covering all new modules"
+      - "tests/integration/test_full_flow.py — 6 end-to-end flow test classes"
+      - "tests/contract/test_appd_response_shapes.py — 8 AppD API contract test classes"
+      - "main.py — set_golden_snapshot tool, deployment/restart detection, extended health stats"
+    success_criteria:
+      - "✅ ruff check: all checks passed (0 errors)"
+      - "✅ mypy: no issues found in 7 new source files"
+      - "✅ pytest tests/unit/test_cache.py: 47 passed"
+      - "✅ pytest tests/: 217 passed (0 failures)"
+      - "✅ TwoLayerCache Pydantic validation evicts corrupt dicts, passes lists through"
+      - "✅ GoldenRegistry entries expire after 24h; invalidate_app clears all BTs"
+      - "✅ CacheInvalidator.on_deployment_detected clears bt_registry + golden_registry"
+      - "✅ CacheInvalidator.on_app_restart_detected clears golden_registry only"
+      - "✅ raw_snapshot_json in NEVER_CACHE — never stored regardless of caller intent"
+      - "✅ Python 3.13 consistency: pyproject.toml requires-python >=3.13, ruff py313, mypy 3.13"
+    completion_notes:
+      - "Fixed mypy: async def set() in cache.py shadows Python builtin set(); resolved by using dict-merge iteration {**hits, **misses} instead of set(x) | set(y)"
+      - "Installed types-cachetools for mypy strict compliance on TTLCache"
+      - "Fixed no-any-return: TTLCache.get() returns Any without stubs; fixed with explicit type annotation on assignment"
+      - "Python version aligned: was py311 in ruff/mypy vs 3.13 in pyproject.toml"
+
+  - id: "007"
+    title: "Identity-Scoped Application Access via AppD RBAC"
+    category: "Security"
+    priority: "High"
+    status: "Complete"
+    impact: "Users see only the applications their AppDynamics RBAC permits — no cross-team data leakage, principle of least privilege enforced at MCP layer"
+    estimated_hours: 6
+    actual_hours: 6
+    completion_percentage: 100
+    completion_date: "2026-04-17"
+    dependencies:
+      - yaml_id: "001"
+        note: "Requires Phase 1 build"
+      - yaml_id: "006"
+        note: "Cache layer must exist before adding user_app_access cache type"
+    technical_summary: |
+      Two service accounts per controller: existing data account (VIEW-level, all operational
+      API calls) and a new RBAC account (admin read-only, RBAC API only). On first tool call
+      from a UPN, user_resolver traverses AppD RBAC — user → direct roles + groups → each
+      group's roles → each role's applicationPermissions — unions all app names where
+      canView=true into a frozenset, cached 1800s per (upn, controller). list_applications
+      filters results to this set; all per-app tools reject app_name not in the set.
+      Cache TTL is configurable: 1800s for session-scoped (default), 86400s (daily) or
+      604800s (weekly) for large stable organisations where roles rarely change.
+    deliverables:
+      - "client/rbac_client.py — RBAC admin API client (GET /controller/api/rbac/v1/users|roles|groups)"
+      - "services/user_resolver.py — UPN → frozenset[str] accessible app names"
+      - "models/types.py — ControllerConfig.rbac_vault_path field"
+      - "controllers.json — rbacVaultPath field per controller"
+      - "utils/cache_keys.py — user_app_access_key(upn, controller)"
+      - "utils/cache.py — user_app_access cache type (configurable TTL)"
+      - ".env.example — APPDYNAMICS_PRODUCTION_RBAC_CLIENT_ID/SECRET"
+      - "main.py — list_applications filter + per-app tool guards"
+    success_criteria:
+      - "list_applications returns only apps in user's AppD RBAC app set"
+      - "Per-app tools raise PermissionError for apps outside user's access set"
+      - "RBAC lookup failure fails closed (empty app set)"
+      - "App set cached with configurable TTL (default 86400s daily, tunable via APPDYNAMICS_RBAC_CACHE_TTL_S)"
+      - "All 247 tests still passing"
+    completion_notes:
+      - "client/rbac_client.py — RBAC admin API client (get_user_by_name, get_role, get_group, ping)"
+      - "services/user_resolver.py — UPN→frozenset traversal; per-UPN asyncio.Lock (CONC-02 fix included)"
+      - "list_applications filters both registry fast-path and live-fetch path by user's app set"
+      - "17 per-app tools guarded with _require_app_access(); refresh_user_access tool added (CONFIGURE_ALERTING)"
+      - "get_server_health extended with rbac + rate_limiter sections (GAP-12 also closed here)"
+      - "CONC-01 fixed in same session: parse_snapshot_errors, find_hot_path, score_golden_candidate, _compare wrapped in asyncio.to_thread"
+      - "GAP-08 closed (already done by SCALE-04), GAP-13 closed (tool_results param added to save_runbook)"
+      - "Caching strategy documented: diskcache L1/L2 retained; Redis deferred to CONC-03 (future)"
+
+# Project Statistics
+statistics:
+  total_enhancements: 7
+  completed: 6
+  in_progress: 0
+  planned: 1
+  completion_percentage: 86
+  total_estimated_hours: 44
+  total_actual_hours: 34
+
+# Open Items
+open_items:
+  - "ENH-003: Claude Desktop & Cursor integration testing — blocked on real AppD controller credentials"
+  - "SCALE-06 (partial): Per-team OAuth tokens for defense-in-depth at AppD API layer — deferred; complex Vault topology change. User-facing concern solved by ENH-007 (per-user RBAC scoping); audit team attribution fixed 2026-04-17"
+  - "CONC-03: Multi-worker shared state via Redis (rate limiter buckets, RBAC cache, session roles) — deferred; single process handles <200 concurrent users; Redis adds infra overhead not yet justified"
+
+# Notes
+notes:
+  - "Phase 1 (Enhancement 001) is a single-enhancement full build — all 35 spec files delivered"
+  - "Enhancements 002-005 represent hardening, validation, and extension work"
+  - "No external database dependency — diskcache handles persistence"
+  - "Multi-controller: add entries to controllers.json, no code changes needed"
+  - "Transport: MCP_TRANSPORT env var selects stdio/sse/streamable-http (default stdio)"
