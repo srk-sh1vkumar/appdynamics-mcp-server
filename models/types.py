@@ -169,8 +169,6 @@ class ControllerConfig:
     timezone: str
     app_package_prefix: str
     analytics_url: str
-    vault_path: str
-    rbac_vault_path: str  # separate admin-level credential for RBAC API lookups
 
 
 # ---------------------------------------------------------------------------

@@ -42,10 +42,8 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from auth.appd_auth import TokenManager, get_user_role, require_permission
-from auth.vault_client import create_vault_client
+from auth.simple_credentials import SimpleCredentials
 from client.appd_client import AppDClient, all_clients, get_client, register
-from client.rbac_client import RBACClient
-from services import user_resolver
 from models.types import (
     AppDRole,
     BusinessTransaction,
@@ -65,7 +63,6 @@ from registries.bt_registry import BTEntry, BTRegistry
 from registries.golden_registry import GoldenRegistry, GoldenSnapshot
 from services import bt_classifier, bt_naming, license_check, runbook_generator
 from services import health as health_svc
-from services import team_registry as team_reg
 from services.cache_invalidator import CacheInvalidator
 from utils import cache as cache_mod
 from utils import cache_keys
@@ -169,7 +166,6 @@ STALE_EXCEPTION_WARNING = (
 
 _controllers: list[ControllerConfig] = []
 _token_managers: dict[str, TokenManager] = {}
-_rbac_clients: dict[str, RBACClient] = {}
 _vault_ok: bool = False
 
 # ---------------------------------------------------------------------------
@@ -261,11 +257,10 @@ def audit_log(
     status: str,
     error_code: str | None = None,
 ) -> None:
-    caller_team = team_reg.get_team_for_upn(upn)
     entry: dict[str, Any] = {
         "timestamp": datetime.now(tz=UTC).isoformat(),
         "tool": tool,
-        "user": {"upn": upn, "appd_role": role, "team": caller_team.name if caller_team else None},
+        "user": {"upn": upn, "appd_role": role},
         "parameters": params,
         "controller_name": controller,
         "duration_ms": duration_ms,
@@ -301,11 +296,10 @@ def _degradation_note(controller_name: str = DEFAULT_CONTROLLER) -> str:
 async def list_controllers(upn: str = "dev@local") -> str:
     """List all configured AppDynamics controllers (names + URLs, no credentials)."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="list_controllers",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     status = "success"
     try:
@@ -340,11 +334,10 @@ async def list_applications(
     Results backed by AppsRegistry — no AppD API call if registry is warm.
     """
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="list_applications",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "list_applications")
@@ -352,19 +345,9 @@ async def list_applications(
     try:
         client = get_client(controller_name)
 
-        # Resolve RBAC-permitted app set for this user (cached, daily TTL)
-        rbac_client = _rbac_clients.get(controller_name)
-        user_apps: frozenset[str] | None = None
-        if rbac_client:
-            user_apps = await user_resolver.resolve(upn, controller_name, rbac_client)
-
         # Use registry for fast reads if warm and no free-text search
         if not search and _apps_registry.is_warm(controller_name):
-            all_entries = team_reg.filter_app_entries(
-                _apps_registry.all(controller_name), caller_team
-            )
-            if user_apps:
-                all_entries = [e for e in all_entries if e.name in user_apps]
+            all_entries = _apps_registry.all(controller_name)
             total = len(all_entries)
             page = all_entries[page_offset: page_offset + page_size]
             result: dict[str, Any] = {
@@ -405,29 +388,6 @@ async def list_applications(
                 [AppEntry.from_raw(a, controller_name) for a in enriched],
             )
 
-        # Apply team scoping to live-fetched results
-        if caller_team and caller_team.app_pattern != "*":
-            pre_scope = len(enriched)
-            enriched = [
-                a for a in enriched
-                if team_reg.filter_apps([a.get("name", "")], caller_team)
-            ]
-            if len(enriched) < pre_scope:
-                logger.debug(
-                    "list_applications: scoped %d→%d apps for team '%s'",
-                    pre_scope, len(enriched), caller_team.name,
-                )
-
-        # Apply RBAC user scoping — intersect with apps permitted by AppD RBAC
-        if user_apps:
-            pre_rbac = len(enriched)
-            enriched = [a for a in enriched if a.get("name", "") in user_apps]
-            if len(enriched) < pre_rbac:
-                logger.debug(
-                    "list_applications: RBAC scoped %d→%d apps for upn '%s'",
-                    pre_rbac, len(enriched), upn,
-                )
-
         result = {
             "page_offset": page_offset,
             "page_size": page_size,
@@ -435,8 +395,6 @@ async def list_applications(
         }
         if search:
             result["search"] = search
-        if caller_team:
-            result["team_scope"] = caller_team.name
         if len(enriched) == page_size:
             result["next_page_offset"] = page_offset + page_size
 
@@ -464,15 +422,14 @@ async def search_metric_tree(
 ) -> str:
     """Browse the AppDynamics metric hierarchy to find valid metric paths."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="search_metric_tree",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "search_metric_tree")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         cache_key = cache_keys.make_key(
@@ -509,15 +466,14 @@ async def get_metrics(
 ) -> str:
     """Fetch time-series metric data as a Markdown table. Max 800 tokens."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_metrics",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_metrics")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         cache_key = cache_keys.metric_values_key(
@@ -568,15 +524,14 @@ async def get_business_transactions(
 ) -> str:
     """PRIMARY entry point. Lists classified BTs sorted by error rate."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_business_transactions",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_business_transactions")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         cache_key = cache_keys.bt_list_key(upn, controller_name, app_name)
@@ -631,15 +586,14 @@ async def get_bt_baseline(
 ) -> str:
     """Fetch AppDynamics baseline vs current performance for a BT."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_bt_baseline",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_bt_baseline")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         cache_key = cache_keys.bt_baseline_key(
@@ -701,15 +655,14 @@ async def get_bt_detection_rules(
     suggestions for outlier BTs.
     """
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_bt_detection_rules",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_bt_detection_rules")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         client = get_client(controller_name)
@@ -785,11 +738,10 @@ async def load_api_spec(
 ) -> str:
     """Map BT URL paths to operation names using a Swagger/OpenAPI spec."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="load_api_spec",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "load_api_spec")
@@ -864,15 +816,14 @@ async def list_snapshots(
 ) -> str:
     """List request snapshots with optional filters. Max 500 tokens."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="list_snapshots",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "list_snapshots")
-    await _require_app_access(upn, controller_name, app_name)
+
     license_check.require_license("snapshots")
     status = "success"
     try:
@@ -932,15 +883,14 @@ async def analyze_snapshot(
 ) -> str:
     """Fetch and analyse a snapshot: errors, hot path, PII redaction. Max 2000 toks."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="analyze_snapshot",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "analyze_snapshot")
-    await _require_app_access(upn, controller_name, app_name)
+
     license_check.require_license("snapshots")
     status = "success"
     try:
@@ -1020,15 +970,14 @@ async def compare_snapshots(
 ) -> str:
     """Differential snapshot analysis. Auto-selects golden baseline if not provided."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="compare_snapshots",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "compare_snapshots")
-    await _require_app_access(upn, controller_name, app_name)
+
     license_check.require_license("snapshots")
     status = "success"
     try:
@@ -1130,15 +1079,14 @@ async def archive_snapshot(
 ) -> str:
     """Archive a snapshot to prevent AppDynamics from purging it."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="archive_snapshot",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "archive_snapshot")
-    await _require_app_access(upn, controller_name, app_name)
+
     license_check.require_license("snapshots")
     status = "success"
     try:
@@ -1187,15 +1135,14 @@ async def set_golden_snapshot(
     why, and what the previous golden was.
     """
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="set_golden_snapshot",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "set_golden_snapshot")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         client = get_client(controller_name)
@@ -1290,15 +1237,14 @@ async def get_health_violations(
 ) -> str:
     """Get active (and optionally resolved) health violations sorted by severity."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_health_violations",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_health_violations")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         cache_key = cache_keys.make_key(
@@ -1343,15 +1289,14 @@ async def get_policies(
 ) -> str:
     """Get alerting policies. Flags policies with no response action configured."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_policies",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_policies")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         client = get_client(controller_name)
@@ -1384,15 +1329,14 @@ async def get_infrastructure_stats(
 ) -> str:
     """Get CPU, Memory, Disk I/O per tier/node as a Markdown table."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_infrastructure_stats",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_infrastructure_stats")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         cache_key = cache_keys.infrastructure_stats_key(
@@ -1441,15 +1385,14 @@ async def get_jvm_details(
 ) -> str:
     """Get JVM heap, GC time, thread counts, and deadlocked threads."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_jvm_details",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_jvm_details")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         client = get_client(controller_name)
@@ -1484,15 +1427,14 @@ async def get_tiers_and_nodes(
     to discover the correct tier_name and node_name values.
     """
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_tiers_and_nodes",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_tiers_and_nodes")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         cache_key = cache_keys.tiers_and_nodes_key(upn, controller_name, app_name)
@@ -1548,15 +1490,14 @@ async def get_exit_calls(
     took. Use after analyze_snapshot to identify slow dependencies.
     """
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_exit_calls",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_exit_calls")
-    await _require_app_access(upn, controller_name, app_name)
+
     license_check.require_license("snapshots")
     status = "success"
     try:
@@ -1622,15 +1563,14 @@ async def get_agent_status(
     node's availability, last reported time, and agent version.
     """
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_agent_status",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_agent_status")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         client = get_client(controller_name)
@@ -1705,15 +1645,14 @@ async def get_errors_and_exceptions(
 ) -> str:
     """Get exceptions including stale ones. Stale = fixed OR broken instrumentation."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_errors_and_exceptions",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_errors_and_exceptions")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         client = get_client(controller_name)
@@ -1754,15 +1693,14 @@ async def get_database_performance(
 ) -> str:
     """Top 10 slowest DB queries. Requires Database Visibility license."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_database_performance",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_database_performance")
-    await _require_app_access(upn, controller_name, app_name)
+
     license_check.require_license("database_visibility")
     status = "success"
     try:
@@ -1795,15 +1733,14 @@ async def get_network_kpis(
 ) -> str:
     """Network health between tiers: packet loss, RTT, retransmissions."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_network_kpis",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_network_kpis")
-    await _require_app_access(upn, controller_name, app_name)
+
     status = "success"
     try:
         client = get_client(controller_name)
@@ -1831,11 +1768,10 @@ async def query_analytics_logs(
 ) -> str:
     """Execute ADQL query against the Events Service. Max 1500 tokens."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="query_analytics_logs",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "query_analytics_logs")
@@ -1882,11 +1818,10 @@ async def stitch_async_trace(
 ) -> str:
     """Correlate snapshots across async service boundaries via correlation ID."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="stitch_async_trace",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "stitch_async_trace")
@@ -2003,11 +1938,10 @@ async def get_eum_overview(
 ) -> str:
     """EUM overview: page load time, JS error rate, crash rate, active users."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_eum_overview",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_eum_overview")
@@ -2036,11 +1970,10 @@ async def get_eum_page_performance(
 ) -> str:
     """Per-page breakdown: DNS, TCP, server, DOM, render times."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_eum_page_performance",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_eum_page_performance")
@@ -2068,11 +2001,10 @@ async def get_eum_js_errors(
 ) -> str:
     """JavaScript errors with stack traces, browser info, and occurrence counts."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_eum_js_errors",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_eum_js_errors")
@@ -2100,11 +2032,10 @@ async def get_eum_ajax_requests(
 ) -> str:
     """Ajax call performance correlated to backend BTs."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_eum_ajax_requests",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_eum_ajax_requests")
@@ -2132,11 +2063,10 @@ async def get_eum_geo_performance(
 ) -> str:
     """Performance breakdown by country/region."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_eum_geo_performance",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_eum_geo_performance")
@@ -2165,15 +2095,14 @@ async def correlate_eum_to_bt(
 ) -> str:
     """Find Ajax calls that triggered a backend BT. Shows user-perceived impact."""
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="correlate_eum_to_bt",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "correlate_eum_to_bt")
-    await _require_app_access(upn, controller_name, app_name)
+
     license_check.require_license("eum")
     status = "success"
     try:
@@ -2209,37 +2138,6 @@ async def correlate_eum_to_bt(
                   controller_name, int((time.monotonic() - start) * 1000), status)
 
 
-@mcp.tool()
-async def refresh_user_access(
-    target_upn: str,
-    controller_name: str = "production",
-    upn: str = "dev@local",
-) -> str:
-    """Force-invalidate the RBAC app-access cache for a user.
-
-    Use when a user's AppDynamics role or group has just changed and you
-    need the new permissions to take effect immediately (without waiting
-    for the daily cache TTL to expire).
-
-    Requires CONFIGURE_ALERTING permission. The caller's own cache is
-    also invalidatable by passing their own UPN as target_upn.
-    """
-    role = await _get_role(upn, controller_name)
-    require_permission(role, "set_golden_snapshot")  # CONFIGURE_ALERTING gate
-    existed = user_resolver.invalidate_user(target_upn, controller_name)
-    return json.dumps({
-        "target_upn": target_upn,
-        "controller": controller_name,
-        "cache_cleared": existed,
-        "message": (
-            f"Access cache cleared for {target_upn}. "
-            "Next tool call will re-fetch from AppDynamics RBAC."
-            if existed else
-            f"No cached entry found for {target_upn} on {controller_name}."
-        ),
-    })
-
-
 # ---------------------------------------------------------------------------
 # Tool: Health + Runbook
 # ---------------------------------------------------------------------------
@@ -2264,10 +2162,6 @@ async def get_server_health(upn: str = "dev@local") -> str:
         "disk_entries": cache_mod.disk_entry_count(),
         "golden_registry": _golden_registry.get_stats(),
         "invalidations_last_hour": _cache_invalidator.get_stats(),
-    }
-    result["rbac"] = {
-        "controllers_with_rbac": list(_rbac_clients.keys()),
-        "user_app_access_cache": user_resolver.get_cache_stats(),
     }
     result["rate_limiter"] = get_rate_limiter_stats()
     return json.dumps(result, indent=2)
@@ -2356,11 +2250,10 @@ async def get_team_health_summary(
     Uses the AppsRegistry — seeds from AppDynamics if not already warm.
     """
     start = time.monotonic()
-    caller_team = team_reg.get_team_for_upn(upn)
     rate_msg = await check_and_wait(
         upn,
         tool_name="get_team_health_summary",
-        team_name=caller_team.name if caller_team else None,
+        team_name=None,
     )
     role = await _get_role(upn, controller_name)
     require_permission(role, "get_health_violations")
@@ -2368,22 +2261,16 @@ async def get_team_health_summary(
     try:
         client = get_client(controller_name)
 
-        # Resolve team-scoped app list from registry (fast) or live fetch
+        # Fetch all app names from registry (fast) or live
         if _apps_registry.is_warm(controller_name):
-            entries = team_reg.filter_app_entries(
-                _apps_registry.all(controller_name), caller_team
-            )
-            app_names = [e.name for e in entries]
+            app_names = [e.name for e in _apps_registry.all(controller_name)]
         else:
             raw_apps = await client.list_all_applications()
-            all_names = [a.get("name", "") for a in raw_apps if a.get("name")]
-            app_names = team_reg.filter_apps(all_names, caller_team)
+            app_names = [a.get("name", "") for a in raw_apps if a.get("name")]
 
         if not app_names:
             return json.dumps(
-                {"team": caller_team.name if caller_team else "unscoped",
-                 "apps_checked": 0,
-                 "warning": "No applications found for this team."},
+                {"apps_checked": 0, "warning": "No applications found on this controller."},
                 indent=2,
             )
 
@@ -2439,7 +2326,6 @@ async def get_team_health_summary(
         total_viols = sum(a.get("total_violations", 0) for a in app_summaries_list)
 
         result: dict[str, Any] = {
-            "team": caller_team.name if caller_team else "unscoped",
             "controller": controller_name,
             "duration_mins": duration_mins,
             "apps_checked": len(app_names),
@@ -2469,25 +2355,7 @@ async def get_team_health_summary(
 
 
 async def _get_role(upn: str, controller_name: str) -> AppDRole:
-    client = get_client(controller_name)
-    return await get_user_role(upn, client, controller_name)
-
-
-async def _require_app_access(upn: str, controller_name: str, app_name: str) -> None:
-    """Raise PermissionError if the user's AppD RBAC does not permit app_name.
-
-    Skipped when no RBAC client is configured for the controller (e.g. dev mode
-    with no rbacVaultPath) — falls back to AppD backend RBAC only.
-    """
-    rbac_client = _rbac_clients.get(controller_name)
-    if not rbac_client:
-        return
-    allowed = await user_resolver.resolve(upn, controller_name, rbac_client)
-    if allowed and app_name not in allowed:
-        raise PermissionError(
-            f"Application '{app_name}' is not accessible to {upn}. "
-            "Your AppDynamics RBAC role does not grant access to this application."
-        )
+    return await get_user_role(upn)
 
 
 def _wrap_cached(data: object, rate_msg: str | None) -> str:
@@ -2517,10 +2385,7 @@ async def startup() -> None:
         print(f"[main] controllers.json malformed: {exc}. Exiting.", file=sys.stderr)
         sys.exit(1)
 
-    vault = create_vault_client()
-
-    # Load team registry (non-fatal if missing)
-    team_reg.load_teams(config_data)
+    creds = SimpleCredentials()
 
     for ctrl in config_data.get("controllers", []):
         cfg = ControllerConfig(
@@ -2531,13 +2396,11 @@ async def startup() -> None:
             timezone=ctrl.get("timezone", "UTC"),
             app_package_prefix=ctrl.get("appPackagePrefix", ""),
             analytics_url=ctrl.get("analyticsUrl", "https://analytics.api.appdynamics.com"),
-            vault_path=ctrl.get("vaultPath", f"secret/appdynamics/{ctrl['name']}"),
-            rbac_vault_path=ctrl.get("rbacVaultPath", ""),
         )
         _controllers.append(cfg)
 
         token_url = f"{cfg.url}/controller/api/oauth/access_token"
-        tm = TokenManager(vault, cfg.vault_path, token_url)
+        tm = TokenManager(creds, cfg.name, token_url)
         await tm.initialise()
         _token_managers[cfg.name] = tm
 
@@ -2545,24 +2408,6 @@ async def startup() -> None:
         register(cfg.name, client)
 
         await client.check_api_version()
-
-        # RBAC client — separate admin-level credential for user/role/group lookups.
-        # Non-fatal if rbacVaultPath is not configured (dev/no-RBAC mode).
-        if cfg.rbac_vault_path:
-            try:
-                rbac_tm = TokenManager(vault, cfg.rbac_vault_path, token_url)
-                await rbac_tm.initialise()
-                _rbac_clients[cfg.name] = RBACClient(cfg.url, rbac_tm)
-                print(
-                    f"[main] RBAC client initialised for controller '{cfg.name}'",
-                    file=sys.stderr,
-                )
-            except Exception as exc:
-                print(
-                    f"[main] RBAC client init failed for '{cfg.name}' "
-                    f"(non-fatal — app scoping disabled): {exc}",
-                    file=sys.stderr,
-                )
 
     _vault_ok = True
 

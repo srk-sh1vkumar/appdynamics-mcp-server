@@ -1,149 +1,95 @@
-# AppDynamics MCP Server
+# AppDynamics MCP Server — Single-User Mode
 
-A production-grade **Model Context Protocol (MCP)** server for AppDynamics APM, enabling fully autonomous end-to-end incident investigation — from alert detection to root-cause analysis — without requiring human intervention at each step.
+Connect your AI assistant (Claude Desktop or Cursor) directly to your AppDynamics
+controller using your own admin OAuth2 credentials. Five-minute setup.
 
----
-
-## Features
-
-- **29 MCP tools** covering applications, business transactions, snapshots, metrics, health rules, EUM, database visibility, analytics, infrastructure, and golden baseline management
-- **Multi-controller** support — investigate across several AppDynamics environments in a single session
-- **Autonomous investigation** — 16-step investigation sequence baked into the system prompt
-- **Read-only** — no write operations to AppDynamics; safe to connect to production
-- **Per-user permission enforcement** — AppDynamics RBAC is the sole authority (fail-closed)
-- **Graceful license degradation** — unlicensed modules return helpful messages, not cryptic 404s
-- **Production caching layer** — per-data-type TTLCache (L1) + diskcache (L2); `TwoLayerCache` with Pydantic validation and structural eviction of corrupt entries
-- **Event-driven cache invalidation** — deployment detection (BT count shift), app restart detection (APP_CRASH/NODE_RESTART violations), and manual golden override
-- **Golden baseline registry** — per-BT golden snapshot with 24h TTL, shared across users, crash-safe disk persistence
-- **Persistent registries** — `AppsRegistry` and `BTRegistry` survive MCP restarts for mid-incident continuity
-- **Token-bucket rate limiter** — global (10 req/s) and per-user (5 req/s)
-- **PII redaction** — email addresses, JWTs, Bearer tokens, card numbers stripped before tool output
-- **Audit log** — structured JSON on stderr for every tool invocation
-- **K8s liveness probe** — minimal asyncio HTTP server on port 8080
+> **Enterprise / multi-user deployment?** See the [`main`](../../tree/main) branch —
+> it adds HashiCorp Vault, per-user RBAC app scoping, team filtering, and audit
+> log persistence for shared org-wide deployments.
 
 ---
 
 ## Prerequisites
 
-| Requirement | Version |
-|-------------|---------|
-| Python | 3.13+ |
-| uv | latest (`pip install uv`) |
-| AppDynamics controller | 22.x or later |
-| HashiCorp Vault | optional (dev mode uses env vars) |
+- Python 3.13+, [uv](https://docs.astral.sh/uv/)
+- An AppDynamics controller with an **OAuth2 API Client** that has admin access
+- Claude Desktop or Cursor
 
 ---
 
-## Quick Start
+## 1. Clone and install
 
 ```bash
-# 1. Clone / copy the project
+git clone https://github.com/srk-sh1vkumar/appdynamics-mcp-server.git
 cd appdynamics-mcp-server
-
-# 2. Copy environment template
-cp .env.example .env
-# Edit .env with your credentials
-
-# 3. Edit controllers.json (see below)
-
-# 4. Install dependencies
+git checkout single-user-mode
 uv sync
-
-# 5. Run
-uv run python -m main
 ```
 
 ---
 
-## Environment Variables
+## 2. Configure your controller
 
-All sensitive configuration is provided via environment variables. **Never hard-code credentials.**
-
-### Vault Mode
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `VAULT_MODE` | No | `mock` (default, reads env vars) or `hashicorp` |
-| `VAULT_ADDR` | hashicorp only | Vault server address, e.g. `https://vault.example.com` |
-| `VAULT_TOKEN` | hashicorp only | Vault access token |
-| `VAULT_NAMESPACE` | No | Vault namespace (Enterprise) |
-
-### Credentials (mock / dev mode)
-
-For each controller, env var names are derived from the `vaultPath` in `controllers.json` by stripping the `secret/` prefix, replacing `/` with `_`, and uppercasing.
-
-**Example** — `vaultPath: "secret/appdynamics/production"`:
-
-| Variable | Description |
-|----------|-------------|
-| `APPDYNAMICS_PRODUCTION_CLIENT_ID` | OAuth2 client ID |
-| `APPDYNAMICS_PRODUCTION_CLIENT_SECRET` | OAuth2 client secret |
-
-### Liveness Probe
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HEALTH_PORT` | `8080` | Port for K8s liveness HTTP server |
-| `HEALTH_HOST` | `0.0.0.0` | Bind address |
-
-### Cache
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DISKCACHE_DIR` | `data/diskcache` | Persistent cache directory |
-| `DISKCACHE_SIZE_LIMIT_GB` | `2` | Max disk cache size in GB |
-
----
-
-## controllers.json
-
-Place this file in the project root. All keys are **camelCase**.
+Edit `controllers.json` with your AppDynamics controller details:
 
 ```json
 {
   "controllers": [
     {
       "name": "production",
-      "url": "https://mycompany.saas.appdynamics.com",
-      "account": "mycompany",
-      "globalAccount": "mycompany_abc123xyz",
-      "timezone": "America/New_York",
-      "appPackagePrefix": "com.mycompany",
-      "analyticsUrl": "https://analytics.api.appdynamics.com",
-      "vaultPath": "secret/appdynamics/production"
-    },
-    {
-      "name": "staging",
-      "url": "https://mycompany-staging.saas.appdynamics.com",
-      "account": "mycompany-staging",
-      "globalAccount": "mycompany-staging_abc123xyz",
+      "url": "https://your-account.saas.appdynamics.com",
+      "account": "your-account-name",
+      "globalAccount": "your-global-account-name",
       "timezone": "UTC",
-      "appPackagePrefix": "com.mycompany",
-      "analyticsUrl": "https://analytics.api.appdynamics.com",
-      "vaultPath": "secret/appdynamics/staging"
+      "appPackagePrefix": "com.yourcompany",
+      "analyticsUrl": "https://analytics.api.appdynamics.com"
     }
   ]
 }
 ```
 
-### Field Reference
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Unique controller identifier used as the `controller` parameter in tool calls |
-| `url` | Yes | Base URL of the AppDynamics controller (no trailing slash) |
-| `account` | Yes | AppDynamics account name |
-| `globalAccount` | Yes | Global account name (used for OAuth2 token endpoint) |
-| `timezone` | No | IANA timezone for display formatting (default: `UTC`) |
-| `appPackagePrefix` | No | Java package prefix used to identify application frames in stack traces |
-| `analyticsUrl` | No | AppDynamics Analytics / Events Service URL (required for `query_analytics_logs`) |
-| `vaultPath` | Yes | Vault path where `client_id` and `client_secret` are stored |
+The `name` field is used to derive env var names (see next step).
 
 ---
 
-## MCP Client Configuration
+## 3. Set credentials
 
-### Claude Desktop
+```bash
+cp .env.example .env
+```
+
+Edit `.env`:
+
+```bash
+APPDYNAMICS_PRODUCTION_CLIENT_ID=your-oauth2-client-id
+APPDYNAMICS_PRODUCTION_CLIENT_SECRET=your-oauth2-client-secret
+```
+
+The env var prefix is the controller `name` uppercased:
+- `"production"` → `APPDYNAMICS_PRODUCTION_CLIENT_ID`
+- `"staging"` → `APPDYNAMICS_STAGING_CLIENT_ID`
+
+**Create an API Client in AppDynamics:**
+> Controller → Settings → Administration → API Clients → + Create
+> Grant: Account Owner or equivalent admin role.
+
+---
+
+## 4. Test startup
+
+```bash
+uv run python main.py
+```
+
+You should see:
+```
+[auth] Token refreshed for controller 'production'. Expires at ...
+[main] AppDynamics MCP Server v1.0.0 started. Controllers: ['production']. Mode: FULL
+```
+
+---
+
+## 5. Connect Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -152,43 +98,34 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "appdynamics": {
       "command": "uv",
-      "args": [
-        "run",
-        "--project",
-        "/absolute/path/to/appdynamics-mcp-server",
-        "python",
-        "-m",
-        "main"
-      ],
+      "args": ["run", "--directory", "/path/to/appdynamics-mcp-server", "python", "main.py"],
       "env": {
-        "APPDYNAMICS_PRODUCTION_CLIENT_ID": "your_client_id",
-        "APPDYNAMICS_PRODUCTION_CLIENT_SECRET": "your_client_secret"
+        "APPDYNAMICS_PRODUCTION_CLIENT_ID": "your-client-id",
+        "APPDYNAMICS_PRODUCTION_CLIENT_SECRET": "your-client-secret"
       }
     }
   }
 }
 ```
 
-### Cursor
+Restart Claude Desktop. The AppDynamics tools will appear in the tool list.
 
-Add to `.cursor/mcp.json` (project-level) or `~/.cursor/mcp.json` (global):
+---
+
+## 6. Connect Cursor
+
+Add to `.cursor/mcp.json` in your project root:
 
 ```json
 {
   "mcpServers": {
     "appdynamics": {
       "command": "uv",
-      "args": [
-        "run",
-        "--project",
-        "/absolute/path/to/appdynamics-mcp-server",
-        "python",
-        "-m",
-        "main"
-      ],
+      "args": ["run", "--directory", "/path/to/appdynamics-mcp-server", "python", "main.py"],
       "env": {
-        "APPDYNAMICS_PRODUCTION_CLIENT_ID": "your_client_id",
-        "APPDYNAMICS_PRODUCTION_CLIENT_SECRET": "your_client_secret"
+        "MCP_TRANSPORT": "streamable-http",
+        "APPDYNAMICS_PRODUCTION_CLIENT_ID": "your-client-id",
+        "APPDYNAMICS_PRODUCTION_CLIENT_SECRET": "your-client-secret"
       }
     }
   }
@@ -197,213 +134,54 @@ Add to `.cursor/mcp.json` (project-level) or `~/.cursor/mcp.json` (global):
 
 ---
 
-## HashiCorp Vault Configuration
+## Available Tools (28)
 
-In production, credentials are fetched from Vault using the KV secrets engine.
-
-### KV v2 path layout (recommended)
-
-```
-secret/
-└── appdynamics/
-    ├── production/
-    │   ├── client_id      → <OAuth2 client ID>
-    │   └── client_secret  → <OAuth2 client secret>
-    └── staging/
-        ├── client_id
-        └── client_secret
-```
-
-### KV v1 path layout
-
-```
-secret/appdynamics/production   →  { "client_id": "...", "client_secret": "..." }
-```
-
-Set `VAULT_MODE=hashicorp` and provide `VAULT_ADDR` + `VAULT_TOKEN` in the environment.
+| Category | Tools |
+|----------|-------|
+| Discovery | `list_controllers`, `list_applications`, `search_applications`, `search_metric_tree`, `get_metrics` |
+| Business Transactions | `get_business_transactions`, `get_bt_baseline`, `get_bt_detection_rules`, `load_api_spec` |
+| Snapshots | `list_snapshots`, `analyze_snapshot`, `compare_snapshots`, `set_golden_snapshot`, `archive_snapshot`, `get_exit_calls` |
+| Health & Policies | `get_health_violations`, `get_policies`, `get_infrastructure_stats`, `get_jvm_details`, `get_tiers_and_nodes`, `get_agent_status`, `get_team_health_summary` |
+| Deep Diagnostics | `get_errors_and_exceptions`, `get_database_performance`, `get_network_kpis`, `query_analytics_logs`, `stitch_async_trace` |
+| EUM | `get_eum_overview`, `correlate_eum_to_bt` |
+| Server | `get_server_health`, `save_runbook`, `load_recent_runbooks` |
 
 ---
 
-## License Detection & Graceful Degradation
+## Example Prompts
 
-At startup, the server probes the AppDynamics controller to detect which modules are licensed. Unlicensed tools return a clear, human-readable message instead of a cryptic API error.
-
-| Module | Tools Gated | Degradation Mode |
-|--------|-------------|------------------|
-| APM Pro | `list_snapshots`, `analyze_snapshot`, `compare_snapshots`, `archive_snapshot` | `NO_SNAPSHOTS` |
-| Analytics | `query_analytics_logs` | `NO_ANALYTICS` |
-| End User Monitoring | `get_eum_overview`, `get_eum_page_performance`, `get_eum_js_errors`, `get_eum_ajax_requests`, `get_eum_geo_performance`, `correlate_eum_to_bt` | `NO_EUM` |
-| Database Visibility | `get_database_performance` | — |
-| Full | all tools active | `FULL` |
-
-Disabled tools are reported in `get_server_health` under `disabled_tools`.
-
----
-
-## Kubernetes Liveness Probe
-
-The server starts a minimal asyncio HTTP server on port 8080 that responds to any request with:
-
-```json
-{"status": "ok"}
 ```
+Investigate why PaymentService response times spiked in the last hour.
 
-Configure in your K8s deployment:
+Show me all applications with open health violations.
 
-```yaml
-livenessProbe:
-  httpGet:
-    path: /health
-    port: 8080
-  initialDelaySeconds: 10
-  periodSeconds: 30
-  failureThreshold: 3
+Analyze snapshot abc-123 from CheckoutService and find the root cause.
+
+Compare the failed snapshot with the golden baseline for the /checkout BT.
 ```
 
 ---
 
-## Adding a New Tool
+## Multiple Controllers
 
-1. **Add the AppD API call** to [client/appd_client.py](client/appd_client.py) as an async method.
-2. **Add input/output types** to [models/types.py](models/types.py) — Pydantic for API boundaries, `@dataclass` for internal domain objects.
-3. **Register the tool** in [main.py](main.py) using the `@mcp.tool()` decorator. Follow the existing pattern:
-   - Call `await check_and_wait(upn)` for rate limiting
-   - Resolve the controller to a client via `get_client(controller_name)`
-   - Fetch data, sanitize via `sanitize_and_wrap()`
-   - Truncate to budget via `truncate_to_budget()`
-   - Emit `audit_log()`
-4. **If the tool requires a license**, call `license_check.require_license("module_name")` near the top of the tool function and add the tool name to `_MODULE_TOOLS` in [services/license_check.py](services/license_check.py).
-5. **Write tests** in [tests/unit/test_tools.py](tests/unit/test_tools.py) covering happy path, 401/403/404/429/500 error cases, and license-disabled behaviour.
-6. Update the tool count in this README.
-
----
-
-## Docker
+Add entries to `controllers.json` and matching env vars:
 
 ```bash
-# Build
-docker build -t appd-mcp-server .
-
-# Run with mock credentials (no real controller required)
-echo '{"controllers":[]}' > controllers.json
-docker run -i \
-  -p 8080:8080 \
-  -e VAULT_MODE=mock \
-  -v $(pwd)/controllers.json:/app/controllers.json:ro \
-  appd-mcp-server
-
-# Run with real credentials
-docker run -i \
-  -p 8080:8080 \
-  -e VAULT_MODE=mock \
-  -e APPDYNAMICS_PRODUCTION_CLIENT_ID=your_client_id \
-  -e APPDYNAMICS_PRODUCTION_CLIENT_SECRET=your_client_secret \
-  -v $(pwd)/controllers.json:/app/controllers.json:ro \
-  appd-mcp-server
+APPDYNAMICS_PRODUCTION_CLIENT_ID=prod-client-id
+APPDYNAMICS_PRODUCTION_CLIENT_SECRET=prod-client-secret
+APPDYNAMICS_STAGING_CLIENT_ID=staging-client-id
+APPDYNAMICS_STAGING_CLIENT_SECRET=staging-client-secret
 ```
 
-The `-i` flag is required — MCP communicates over stdin/stdout and the container exits immediately without it.
-
-The liveness probe is available at `http://localhost:8080/health` once the container starts.
+All tools accept an optional `controller_name` parameter (default: `"production"`).
 
 ---
 
-## Running Tests
+## Troubleshooting
 
-```bash
-# All unit tests
-uv run pytest tests/unit/ -v
-
-# With coverage report (HTML output in htmlcov/)
-uv run pytest tests/unit/ --cov=. --cov-report=html
-
-# Specific test file
-uv run pytest tests/unit/test_snapshot_parser.py -v
-```
-
-**Current status**: 217 tests, 0 failures. Coverage: parsers 95–99%, sanitizer 98%, bt_classifier 100%, cache/registry layer fully covered by 47 dedicated unit tests.
-
----
-
-## Project Structure
-
-```
-appdynamics-mcp-server/
-├── main.py                        # FastMCP server, all 29 tools, startup sequence
-├── pyproject.toml                 # Project config, dependencies (Python 3.13+)
-├── controllers.json               # Controller definitions (camelCase keys)
-├── .env.example                   # Environment variable template
-├── Dockerfile                     # Multi-stage alpine build
-│
-├── models/
-│   └── types.py                   # Enums, dataclasses, Pydantic models
-│
-├── utils/
-│   ├── cache.py                   # TwoLayerCache + CachedSnapshotAnalysis + module-level API
-│   ├── cache_keys.py              # Centralised UPN-namespaced key builder
-│   ├── rate_limiter.py            # Token bucket (global + per-user)
-│   ├── sanitizer.py               # PII redaction + prompt injection protection
-│   └── timezone.py                # UTC normalization + display formatting
-│
-├── registries/
-│   ├── apps_registry.py           # AppEntry + AppsRegistry (TTLCache L1 + diskcache L2)
-│   ├── bt_registry.py             # BTEntry + BTRegistry (TTLCache L1 + diskcache L2)
-│   └── golden_registry.py         # GoldenSnapshot + GoldenRegistry (24h TTL, shared)
-│
-├── auth/
-│   ├── vault_client.py            # Mock + HashiCorp Vault credential fetching
-│   └── appd_auth.py               # TokenManager, session cache, permission gating
-│
-├── client/
-│   └── appd_client.py             # httpx async client, retry, all AppD API methods
-│
-├── parsers/
-│   ├── stack/
-│   │   ├── java.py
-│   │   ├── nodejs.py
-│   │   ├── python_parser.py
-│   │   └── dotnet.py
-│   └── snapshot_parser.py         # Language detection, smoking gun, baseline scoring
-│
-├── services/
-│   ├── bt_classifier.py           # Criticality scoring, health-check detection
-│   ├── cache_invalidator.py       # Event-driven invalidation (deployment/restart/manual)
-│   ├── license_check.py           # Module license detection + tool gating
-│   ├── runbook_generator.py       # JSON runbook generation + recurring detection
-│   └── health.py                  # Health aggregation + K8s liveness probe
-│
-├── tests/
-│   ├── conftest.py                # Shared fixtures
-│   ├── mocks/
-│   │   └── appd_server.py         # httpx MockTransport for unit tests
-│   ├── unit/
-│   │   ├── test_cache.py          # 47 tests: TwoLayerCache, registries, invalidator
-│   │   ├── test_snapshot_parser.py
-│   │   ├── test_bt_classifier.py
-│   │   ├── test_sanitizer.py
-│   │   └── test_tools.py
-│   ├── integration/
-│   │   └── test_full_flow.py      # End-to-end flow tests (discovery → analysis)
-│   └── contract/
-│       └── test_appd_response_shapes.py  # AppD API response shape contracts
-│
-├── runbooks/                      # Auto-generated JSON runbooks (git-ignored)
-└── data/
-    ├── diskcache/                 # Module-level persistent cache (git-ignored)
-    ├── two_layer_cache/           # TwoLayerCache disk layer (git-ignored)
-    └── registry/
-        ├── apps/                  # AppsRegistry diskcache (git-ignored)
-        ├── bts/                   # BTRegistry diskcache (git-ignored)
-        └── golden/                # GoldenRegistry diskcache (git-ignored)
-```
-
----
-
-## Security Notes
-
-- **Read-only**: The server issues only GET requests (plus one POST for Analytics). It never modifies AppDynamics configuration.
-- **Fail-closed permissions**: If the AppDynamics RBAC check fails for any reason, the tool call is rejected.
-- **PII redaction**: All tool output is scanned for email addresses, JWT tokens, Bearer credentials, and 16-digit card numbers before being returned to the LLM.
-- **Prompt injection protection**: All AppDynamics data is wrapped in `<appd_data>` XML tags so the LLM can distinguish controller data from instructions.
-- **No shell execution**: The server never spawns subprocesses or executes shell commands.
-- **UPN-namespaced cache**: Each user's cached data is keyed by their UPN — no cross-user data leakage.
+| Error | Fix |
+|-------|-----|
+| `Missing env vars: [...]` | Check `.env`. Controller `name` must match the env var prefix (uppercased). |
+| `401 Unauthorized` | Verify the OAuth2 client has Account Owner or admin access. |
+| `controllers.json not found` | Run from the project root, or set `--directory` in MCP config. |
+| Tools missing (EUM, Analytics, DB) | Call `get_server_health` — license-gated tools are listed under `disabled_tools`. |
