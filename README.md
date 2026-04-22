@@ -30,7 +30,13 @@ uv sync
 
 ## 2. Configure your controller
 
-Edit `controllers.json` with your AppDynamics controller details:
+Copy the example and fill in your details:
+
+```bash
+cp controllers.json.example controllers.json
+```
+
+Edit `controllers.json`:
 
 ```json
 {
