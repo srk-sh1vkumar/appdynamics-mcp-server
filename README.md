@@ -61,9 +61,12 @@ cp .env.example .env
 Edit `.env`:
 
 ```bash
-APPDYNAMICS_PRODUCTION_CLIENT_ID=your-oauth2-client-id
-APPDYNAMICS_PRODUCTION_CLIENT_SECRET=your-oauth2-client-secret
+APPDYNAMICS_PRODUCTION_CLIENT_ID=your-client-name
+APPDYNAMICS_PRODUCTION_CLIENT_SECRET=your-client-secret
 ```
+
+Use only the **client name** (e.g. `appd_mcp`), not `name@account` — the server appends
+`@account` automatically from `controllers.json`.
 
 The env var prefix is the controller `name` uppercased:
 - `"production"` → `APPDYNAMICS_PRODUCTION_CLIENT_ID`

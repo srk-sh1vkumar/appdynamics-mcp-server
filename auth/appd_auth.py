@@ -35,11 +35,12 @@ SESSION_TTL_S = 1800
 
 class TokenManager:
     def __init__(
-        self, creds: SimpleCredentials, controller_name: str, token_url: str
+        self, creds: SimpleCredentials, controller_name: str, token_url: str, account: str = ""
     ) -> None:
         self._creds = creds
         self._controller_name = controller_name
         self._token_url = token_url
+        self._account = account
         self._cache: TokenCache | None = None
         self._lock = asyncio.Lock()
         self._refresh_task: asyncio.Task[None] | None = None
@@ -66,17 +67,28 @@ class TokenManager:
             return self._cache.access_token
 
     async def _refresh(self) -> None:
+        import base64
+
         import httpx
 
         creds: Credentials = await fetch_credentials_with_retry(
             self._creds, self._controller_name
         )
+        # AppDynamics requires client_id in "name@account" form for OAuth2.
+        # The same qualified ID must appear in both the Basic auth header and the body.
+        qualified_id = (
+            f"{creds.client_id}@{self._account}" if self._account else creds.client_id
+        )
+        basic = base64.b64encode(
+            f"{qualified_id}:{creds.client_secret}".encode()
+        ).decode()
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 self._token_url,
+                headers={"Authorization": f"Basic {basic}"},
                 data={
                     "grant_type": "client_credentials",
-                    "client_id": creds.client_id,
+                    "client_id": qualified_id,
                     "client_secret": creds.client_secret,
                 },
             )

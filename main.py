@@ -2400,7 +2400,7 @@ async def startup() -> None:
         _controllers.append(cfg)
 
         token_url = f"{cfg.url}/controller/api/oauth/access_token"
-        tm = TokenManager(creds, cfg.name, token_url)
+        tm = TokenManager(creds, cfg.name, token_url, account=cfg.account)
         await tm.initialise()
         _token_managers[cfg.name] = tm
 
