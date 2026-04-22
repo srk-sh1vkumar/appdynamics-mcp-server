@@ -2441,7 +2441,9 @@ async def startup() -> None:
     # Start background utilities
     start_rate_limiter()
     health_svc.setup_signal_handlers()
-    await health_svc.start_liveness_server()
+    health_host = os.environ.get("HEALTH_HOST", "0.0.0.0")
+    health_port = int(os.environ.get("HEALTH_PORT", "8080"))
+    await health_svc.start_liveness_server(host=health_host, port=health_port)
 
     print(
         f"[main] AppDynamics MCP Server v{VERSION} started. "
