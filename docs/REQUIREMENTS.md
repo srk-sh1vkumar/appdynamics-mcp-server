@@ -1,5 +1,5 @@
 # AppDynamics MCP Server — Requirements Document
-**Version:** 1.2 (Python Edition)
+**Version:** 1.3 (Python Edition)
 **Status:** Implemented
 **Date:** April 2026
 
@@ -117,9 +117,9 @@ Two service accounts are required per controller:
 
 | AppD Permission | Allowed Tools |
 |----------------|--------------|
-| VIEW | list_applications, search_applications, get_metrics, get_business_transactions, get_health_violations, get_eum_overview, search_metric_tree, get_tiers_and_nodes, get_agent_status, get_team_health_summary, get_server_health, list_controllers |
-| TROUBLESHOOT | All VIEW + analyze_snapshot, compare_snapshots, list_snapshots, get_errors_and_exceptions, get_database_performance, get_jvm_details, stitch_async_trace, get_network_kpis, get_exit_calls, get_bt_baseline, get_infrastructure_stats, save_runbook, load_recent_runbooks, load_api_spec, query_analytics_logs, get_eum_page_performance, get_eum_js_errors, get_eum_ajax_requests, get_eum_geo_performance, correlate_eum_to_bt, get_bt_detection_rules, get_policies |
-| CONFIGURE_ALERTING | All TROUBLESHOOT + archive_snapshot, set_golden_snapshot, refresh_user_access |
+| VIEW | list_applications, list_controllers, search_metric_tree, get_metrics, get_business_transactions, get_bt_baseline, get_bt_detection_rules, load_api_spec, get_health_violations, get_eum_overview, get_infrastructure_stats, get_jvm_details, get_network_kpis, get_server_health, get_tiers_and_nodes, get_agent_status, get_team_health_summary, list_application_events |
+| TROUBLESHOOT | All VIEW + correlate_incident_window, list_snapshots, analyze_snapshot, compare_snapshots, get_exit_calls, get_errors_and_exceptions, get_database_performance, stitch_async_trace, correlate_eum_to_bt, get_eum_page_performance, get_eum_js_errors, get_eum_ajax_requests, get_eum_geo_performance, query_analytics_logs, save_runbook |
+| CONFIGURE_ALERTING | All TROUBLESHOOT + get_policies, archive_snapshot, set_golden_snapshot |
 
 ### 4.4 Security Controls
 
@@ -173,7 +173,7 @@ Two service accounts are required per controller:
 |-----------------|---------|
 | `pyproject.toml` | Dependencies, scripts, ruff + mypy config |
 | `controllers.json` | Multi-controller + team config |
-| `main.py` | MCP server entry point — registers all 29 tools |
+| `main.py` | MCP server entry point — registers all 36 tools |
 | `models/types.py` | Pydantic v2 models, enums, dataclasses |
 | `utils/sanitizer.py` | PII redaction + prompt injection protection |
 | `utils/cache.py` | Two-layer cache: TwoLayerCache class + module-level API |
@@ -196,10 +196,16 @@ Two service accounts are required per controller:
 | `services/bt_classifier.py` | BT grouping, criticality scoring, healthcheck filter |
 | `services/bt_naming.py` | BT name normalisation |
 | `services/cache_invalidator.py` | Event-driven cache invalidation (deployment, restart) |
+| `services/event_analyzer.py` | Application event heuristics → change_indicators (ENH-008) |
 | `services/health.py` | HTTP liveness probe (/health) + Prometheus (/metrics) on port 8080 |
+| `services/incident_correlator.py` | Parallel first-pass triage for correlate_incident_window |
 | `services/license_check.py` | AppD license detection at startup |
 | `services/runbook_generator.py` | Post-investigation runbook output |
+| `services/snapshot_analyzer.py` | analyze_snapshot logic |
+| `services/snapshot_comparator.py` | compare_snapshots / Smoking Gun Report logic |
+| `services/team_health.py` | get_team_health_summary fan-out logic |
 | `services/team_registry.py` | Team-to-UPN-domain and team-to-app-pattern resolution |
+| `services/trace_stitcher.py` | stitch_async_trace correlation logic |
 | `services/user_resolver.py` | UPN → frozenset[str] accessible app names via RBAC |
 | `tests/unit/` | Unit tests with mocked AppD responses |
 | `tests/integration/` | Integration tests against mock server |
@@ -210,7 +216,27 @@ Two service accounts are required per controller:
 
 ---
 
-## 7. Complete Tool Suite (29 tools)
+## 7. Complete Tool Suite (36 tools)
+
+### 7.0 First-Pass Triage
+
+**correlate_incident_window** — Composite first-pass triage for one application inside a
+fixed time window. Fetches health violations, error snapshots, BT summary, and exceptions
+in one parallel call, then automatically runs application event analysis (`include_deploys=True`
+by default) to surface change_indicators (rolling deploy, K8s pod turnover, config change,
+explicit deploy marker). Returns `triage_summary` (one-liner for the model), a chronological
+`timeline`, and structured `deploys` dict. TROUBLESHOOT tier. 3000 token budget.
+
+**list_application_events** — Fetch raw application events for any time window and apply
+change-correlation heuristics to produce `change_indicators`:
+- `explicit_deploy_marker` — APPLICATION_DEPLOYMENT event (HIGH confidence)
+- `config_change` — APPLICATION_CONFIG_CHANGE event (HIGH confidence)
+- `probable_rolling_deploy` — ≥2 nodes same tier restarted within 10 min (HIGH if ≥50% of
+  tier nodes affected, MEDIUM otherwise)
+- `k8s_pod_turnover` — DISCONNECT+CONNECT pairs on new node names within 10 min (HIGH if ≥2 pairs)
+- `single_node_restart` — 1 isolated restart with no tier pattern (LOW — ambiguous)
+VIEW tier. 1500 token budget. Use for post-mortem look-back or wider windows beyond the
+incident window already covered by `correlate_incident_window`.
 
 ### 7.1 Discovery & Navigation
 
@@ -404,6 +430,7 @@ snapshots_archived, affected_users (EUM if available), ticket_ref (null — Phas
 
 | Step | Tool | Classification |
 |------|------|---------------|
+| 0 | correlate_incident_window | CRITICAL — first-pass triage; call before any deep-dive. Returns triage_summary, timeline, BT summary, and change_indicators in one parallel call. include_deploys=True by default. Abort if fails. |
 | 1 | list_applications | CRITICAL — abort if fails |
 | 2 | get_business_transactions | CRITICAL |
 | 3 | get_bt_baseline | IMPORTANT — skip + warn if fails |
@@ -420,6 +447,7 @@ snapshots_archived, affected_users (EUM if available), ticket_ref (null — Phas
 | 14 | archive_snapshot | IMPORTANT |
 | 15 | Smoking Gun Report | CRITICAL |
 | 16 | save_runbook | IMPORTANT |
+| — | list_application_events | OPTIONAL — post-mortem / wider look-back outside incident window |
 
 CRITICAL = abort investigation if fails
 IMPORTANT = log warning, skip step, continue
@@ -536,15 +564,19 @@ Auto-aggregate up to 500 records. Always append omission message.
 ### Context Window Budgets
 | Tool | Max Tokens |
 |------|-----------|
+| correlate_incident_window | 3000 |
+| get_team_health_summary | 2500 |
 | analyze_snapshot | 2000 |
 | compare_snapshots | 2000 |
-| get_errors_and_exceptions | 1000 |
-| query_analytics_logs | 1500 |
-| get_metrics | 800 |
-| list_snapshots | 500 |
-| get_exit_calls | 1000 |
-| get_tiers_and_nodes | 800 |
 | get_bt_detection_rules | 2000 |
+| list_application_events | 1500 |
+| stitch_async_trace | 1500 |
+| query_analytics_logs | 1500 |
+| get_errors_and_exceptions | 1000 |
+| get_exit_calls | 1000 |
+| get_metrics | 800 |
+| get_tiers_and_nodes | 800 |
+| list_snapshots | 500 |
 
 ### Timezone Handling
 Normalize all timestamps to UTC internally (use python-dateutil).
@@ -633,7 +665,7 @@ Version exposed in health endpoint.
 | Contract tests | pytest | Verify AppD response shapes per SaaS update |
 | Mock AppD server | httpx MockTransport | Fixture replay, no live controller needed |
 
-Current coverage: 247 tests, 0 failures.
+Current coverage: 406 tests, 0 failures.
 
 ---
 
@@ -653,4 +685,4 @@ Current coverage: 247 tests, 0 failures.
 
 *Document Owner: SRE Platform Team*
 *Review Cycle: Per sprint*
-*Last Updated: 2026-04-19*
+*Last Updated: 2026-04-28*
