@@ -3,14 +3,25 @@ auth/appd_auth.py
 
 OAuth2 token lifecycle and AppDynamics tool permission gates.
 
-Single-user mode: the caller is always treated as CONFIGURE_ALERTING
-(full access). No role lookup is performed against AppDynamics — the
-admin connected with their own credentials and sees everything.
+Two modes (controlled by APPDYNAMICS_MODE env var, default: enterprise):
+
+  enterprise   — VaultClient credentials, AppD RBAC role lookup via
+                 RBACClient, per-app access filtering, enforcing gates.
+
+  single_user  — SimpleCredentials (env vars), caller is always
+                 CONFIGURE_ALERTING, gates enforce but trivially pass.
 
 Token lifecycle:
-- TokenManager fetches credentials from SimpleCredentials (env vars).
+- TokenManager accepts either a VaultClient (enterprise) or a SimpleCredentials
+  instance (single-user). Duck-typed: if get_credentials is async → vault path.
 - Proactive refresh at T-30min via background asyncio task.
 - On 401: re-fetch credentials and retry once.
+
+Permission model:
+- require_permission() is always enforcing. In single-user mode it passes
+  trivially because get_user_role() always returns CONFIGURE_ALERTING, which
+  has access to every tool.
+- Fail closed: any error in role lookup → AppDRole.DENIED.
 """
 
 from __future__ import annotations
@@ -19,9 +30,12 @@ import asyncio
 import sys
 import time
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
-from auth.simple_credentials import Credentials, SimpleCredentials, fetch_credentials_with_retry
 from models.types import AppDRole, TokenCache
+
+if TYPE_CHECKING:
+    from client.rbac_client import RBACClient
 
 TOKEN_VALIDITY_S = 6 * 3600
 REFRESH_BEFORE_S = 30 * 60
@@ -29,13 +43,13 @@ SESSION_TTL_S = 1800
 
 
 # ---------------------------------------------------------------------------
-# Token manager
+# Token manager — supports both VaultClient and SimpleCredentials
 # ---------------------------------------------------------------------------
 
 
 class TokenManager:
     def __init__(
-        self, creds: SimpleCredentials, controller_name: str, token_url: str, account: str = ""
+        self, creds: Any, controller_name: str, token_url: str, account: str = ""
     ) -> None:
         self._creds = creds
         self._controller_name = controller_name
@@ -71,16 +85,19 @@ class TokenManager:
 
         import httpx
 
-        creds: Credentials = await fetch_credentials_with_retry(
-            self._creds, self._controller_name
-        )
-        # AppDynamics requires client_id in "name@account" form for OAuth2.
-        # The same qualified ID must appear in both the Basic auth header and the body.
+        # Duck-type dispatch: VaultClient.get_credentials is async; SimpleCredentials is sync.
+        if asyncio.iscoroutinefunction(getattr(self._creds, "get_credentials", None)):
+            from auth.vault_client import fetch_credentials_with_retry as _fetch
+        else:
+            from auth.simple_credentials import fetch_credentials_with_retry as _fetch
+
+        raw = await _fetch(self._creds, self._controller_name)
+
         qualified_id = (
-            f"{creds.client_id}@{self._account}" if self._account else creds.client_id
+            f"{raw.client_id}@{self._account}" if self._account else raw.client_id
         )
         basic = base64.b64encode(
-            f"{qualified_id}:{creds.client_secret}".encode()
+            f"{qualified_id}:{raw.client_secret}".encode()
         ).decode()
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
@@ -89,7 +106,7 @@ class TokenManager:
                 data={
                     "grant_type": "client_credentials",
                     "client_id": qualified_id,
-                    "client_secret": creds.client_secret,
+                    "client_secret": raw.client_secret,
                 },
             )
             resp.raise_for_status()
@@ -153,22 +170,64 @@ class TokenManager:
 
 
 # ---------------------------------------------------------------------------
-# Role — single-user mode always returns CONFIGURE_ALERTING
+# Role — mode-aware: session cache + RBAC lookup in enterprise,
+#                    always CONFIGURE_ALERTING in single-user.
 # ---------------------------------------------------------------------------
 
+_sessions: dict[str, tuple[AppDRole, float]] = {}  # upn → (role, cached_at)
 
-async def get_user_role(upn: str, *_args: object, **_kwargs: object) -> AppDRole:
-    """Single-user mode: caller always has full admin access."""
-    return AppDRole.CONFIGURE_ALERTING
+
+def _map_appd_role(roles: list[str]) -> AppDRole:
+    """Map AppD role name strings to the three-tier permission model."""
+    lowered = [r.lower() for r in roles]
+    admin_kws = ("administrator", "configure_alerting", "alerting", "admin")
+    if any(kw in r for r in lowered for kw in admin_kws):
+        return AppDRole.CONFIGURE_ALERTING
+    tshoot_kws = ("troubleshoot", "sre", "devops", "debug", "engineer")
+    if any(kw in r for r in lowered for kw in tshoot_kws):
+        return AppDRole.TROUBLESHOOT
+    if roles:
+        return AppDRole.VIEW
+    return AppDRole.DENIED
+
+
+async def get_user_role(
+    upn: str,
+    rbac_client: "RBACClient | None" = None,
+) -> AppDRole:
+    """
+    Single-user mode (rbac_client=None): always CONFIGURE_ALERTING.
+    Enterprise mode (rbac_client provided): look up AppD RBAC role, cached per session.
+    Fail closed — any error returns DENIED.
+    """
+    if rbac_client is None:
+        return AppDRole.CONFIGURE_ALERTING
+
+    cached = _sessions.get(upn)
+    if cached and (time.time() - cached[1]) < SESSION_TTL_S:
+        return cached[0]
+
+    try:
+        user = await rbac_client.get_user_by_name(upn)
+        role_names: list[str] = (
+            [r.get("name", "") for r in user.get("roles", [])] if user else []
+        )
+        role = _map_appd_role(role_names)
+    except Exception as exc:
+        print(f"[auth] Role lookup failed for {upn}: {exc}. Denying.", file=sys.stderr)
+        return AppDRole.DENIED
+
+    _sessions[upn] = (role, time.time())
+    return role
 
 
 def invalidate_session(upn: str) -> None:
-    """No-op in single-user mode — no session cache."""
+    """Invalidate cached session on mid-session 403 or explicit refresh."""
+    _sessions.pop(upn, None)
 
 
 # ---------------------------------------------------------------------------
-# Tool permission gates — kept for structural compatibility.
-# Since get_user_role always returns CONFIGURE_ALERTING, every gate passes.
+# Tool permission gates
 # ---------------------------------------------------------------------------
 
 _VIEW_TOOLS: frozenset[str] = frozenset({
@@ -186,7 +245,7 @@ _TROUBLESHOOT_TOOLS: frozenset[str] = _VIEW_TOOLS | frozenset({
     "list_snapshots", "analyze_snapshot", "compare_snapshots",
     "get_errors_and_exceptions", "get_database_performance",
     "stitch_async_trace", "correlate_eum_to_bt", "query_analytics_logs",
-    "get_exit_calls", "save_runbook",
+    "get_exit_calls", "save_runbook", "correlate_incident_window",
 })
 
 _CONFIGURE_ALERTING_TOOLS: frozenset[str] = _TROUBLESHOOT_TOOLS | frozenset({
@@ -202,4 +261,15 @@ _ROLE_TOOLS: dict[AppDRole, frozenset[str]] = {
 
 
 def require_permission(role: AppDRole, tool_name: str) -> None:
-    """No-op in single-user mode — role is always CONFIGURE_ALERTING."""
+    """Raise PermissionError if the role cannot call this tool."""
+    allowed = _ROLE_TOOLS.get(role, frozenset())
+    if tool_name not in allowed:
+        min_role = (
+            AppDRole.VIEW if tool_name in _VIEW_TOOLS
+            else AppDRole.TROUBLESHOOT if tool_name in _TROUBLESHOOT_TOOLS
+            else AppDRole.CONFIGURE_ALERTING
+        )
+        raise PermissionError(
+            f"Tool '{tool_name}' requires {min_role.value} permission. "
+            f"Your AppDynamics role: {role.value}."
+        )

@@ -241,68 +241,145 @@ enhancements:
       - "Python version aligned: was py311 in ruff/mypy vs 3.13 in pyproject.toml"
 
   - id: "007"
-    title: "Identity-Scoped Application Access via AppD RBAC"
+    title: "Dual-Mode RBAC — Enterprise + Single-User with Service Extraction"
     category: "Security"
     priority: "High"
     status: "Complete"
-    impact: "Users see only the applications their AppDynamics RBAC permits — no cross-team data leakage, principle of least privilege enforced at MCP layer"
-    estimated_hours: 6
-    actual_hours: 6
+    impact: "Enterprise mode enforces AppD RBAC per-user, per-app with fail-closed semantics. Single-user mode retains env-var simplicity for local use. Mode switch via single env var."
+    estimated_hours: 10
+    actual_hours: 12
     completion_percentage: 100
-    completion_date: "2026-04-17"
+    completion_date: "2026-04-27"
     dependencies:
       - yaml_id: "001"
         note: "Requires Phase 1 build"
       - yaml_id: "006"
         note: "Cache layer must exist before adding user_app_access cache type"
     technical_summary: |
-      Two service accounts per controller: existing data account (VIEW-level, all operational
-      API calls) and a new RBAC account (admin read-only, RBAC API only). On first tool call
-      from a UPN, user_resolver traverses AppD RBAC — user → direct roles + groups → each
-      group's roles → each role's applicationPermissions — unions all app names where
-      canView=true into a frozenset, cached 1800s per (upn, controller). list_applications
-      filters results to this set; all per-app tools reject app_name not in the set.
-      Cache TTL is configurable: 1800s for session-scoped (default), 86400s (daily) or
-      604800s (weekly) for large stable organisations where roles rarely change.
+      Single repo, two modes controlled by APPDYNAMICS_MODE env var (default: enterprise).
+
+      Enterprise mode: VaultClient credentials (MockVaultClient for dev via env vars,
+      HashiCorpVaultClient for prod), RBACClient hits /controller/api/rbac/v1/ admin API,
+      user_resolver traverses AppD RBAC graph (user → direct roles + groups → each group's
+      roles → applicationPermissions canView=true) into a frozenset[str] cached per UPN
+      with configurable TTL (APPDYNAMICS_RBAC_CACHE_TTL_S, default 86400s). TokenManager
+      duck-types between VaultClient (async get_credentials) and SimpleCredentials (sync).
+      require_permission is always enforcing; passes trivially in single-user because
+      get_user_role always returns CONFIGURE_ALERTING. _require_app_access called on all
+      27 app-scoped tools after permission check. list_applications filters both registry
+      fast-path and live-fetch path. Per-UPN asyncio.Lock prevents cold-start serialisation.
+
+      Single-user mode: SimpleCredentials reads APPDYNAMICS_{CTRL}_CLIENT_ID/SECRET env vars.
+      No RBAC lookup. All gates pass. No Vault infra required.
+
+      Also extracts 5 service modules from main.py (incident_correlator, team_health,
+      trace_stitcher, snapshot_comparator, snapshot_analyzer), adds correlate_incident_window
+      as STEP 0 in system prompt, fixes correlate_incident_window missing from permission sets,
+      and adds TOKEN_BUDGETS for high-output tools.
     deliverables:
-      - "client/rbac_client.py — RBAC admin API client (GET /controller/api/rbac/v1/users|roles|groups)"
-      - "services/user_resolver.py — UPN → frozenset[str] accessible app names"
-      - "models/types.py — ControllerConfig.rbac_vault_path field"
-      - "controllers.json — rbacVaultPath field per controller"
-      - "utils/cache_keys.py — user_app_access_key(upn, controller)"
-      - "utils/cache.py — user_app_access cache type (configurable TTL)"
-      - ".env.example — APPDYNAMICS_PRODUCTION_RBAC_CLIENT_ID/SECRET"
-      - "main.py — list_applications filter + per-app tool guards"
+      - "auth/vault_client.py — VaultClient ABC, MockVaultClient, HashiCorpVaultClient, create_vault_client()"
+      - "auth/appd_auth.py — dual-mode TokenManager, get_user_role(rbac_client=None), _map_appd_role, enforcing require_permission"
+      - "client/rbac_client.py — fail-closed RBAC admin API client"
+      - "services/user_resolver.py — UPN → frozenset[str] with per-UPN asyncio.Lock and TTL cache"
+      - "services/incident_correlator.py — correlate_incident_window parallel triage"
+      - "services/team_health.py — get_team_health_summary semaphore fan-out"
+      - "services/trace_stitcher.py — stitch_async_trace correlation ID search"
+      - "services/snapshot_comparator.py — compare_snapshots golden registry + auto-scoring"
+      - "services/snapshot_analyzer.py — analyze_snapshot parsers + EXCEPTION_STRATEGIES"
+      - "models/types.py — ControllerConfig.vault_path + rbac_vault_path fields"
+      - "main.py — IS_ENTERPRISE flag, _rbac_clients dict, _get_role dispatch, _require_app_access on 27 tools, dual-mode startup"
+      - "tests/unit/test_enterprise_mode.py — 29 tests covering both modes"
+      - "tests/unit/test_permissions.py — 32 structural regression tests for permission sets"
+      - "tests/unit/test_incident_correlator.py, test_team_health.py, test_trace_stitcher.py, test_snapshot_comparator.py, test_snapshot_analyzer.py — 71 service module tests"
     success_criteria:
-      - "list_applications returns only apps in user's AppD RBAC app set"
-      - "Per-app tools raise PermissionError for apps outside user's access set"
-      - "RBAC lookup failure fails closed (empty app set)"
-      - "App set cached with configurable TTL (default 86400s daily, tunable via APPDYNAMICS_RBAC_CACHE_TTL_S)"
-      - "All 247 tests still passing"
+      - "✅ APPDYNAMICS_MODE=enterprise: VaultClient used, RBAC graph traversed, per-app access enforced"
+      - "✅ APPDYNAMICS_MODE=single_user: SimpleCredentials, always CONFIGURE_ALERTING, no RBAC call"
+      - "✅ require_permission enforcing in both modes (trivially passes in single-user)"
+      - "✅ _require_app_access fail-closed: empty frozenset denies all apps"
+      - "✅ TokenManager duck-types VaultClient vs SimpleCredentials via asyncio.iscoroutinefunction"
+      - "✅ 330 tests passing, 0 failures"
     completion_notes:
-      - "client/rbac_client.py — RBAC admin API client (get_user_by_name, get_role, get_group, ping)"
-      - "services/user_resolver.py — UPN→frozenset traversal; per-UPN asyncio.Lock (CONC-02 fix included)"
-      - "list_applications filters both registry fast-path and live-fetch path by user's app set"
-      - "17 per-app tools guarded with _require_app_access(); refresh_user_access tool added (CONFIGURE_ALERTING)"
-      - "get_server_health extended with rbac + rate_limiter sections (GAP-12 also closed here)"
-      - "CONC-01 fixed in same session: parse_snapshot_errors, find_hot_path, score_golden_candidate, _compare wrapped in asyncio.to_thread"
-      - "GAP-08 closed (already done by SCALE-04), GAP-13 closed (tool_results param added to save_runbook)"
-      - "Caching strategy documented: diskcache L1/L2 retained; Redis deferred to CONC-03 (future)"
+      - "ENH-007 was originally implemented then deleted when single-user mode was isolated to its own branch"
+      - "Re-implemented as proper dual-mode architecture (Option A: single repo, env var switch)"
+      - "Enterprise is the default — operators must opt-in to single_user convenience mode"
+      - "RBAC client optional per controller: if rbacVaultPath absent, app scoping disabled (allow all) for that controller"
+      - "service extractions complete: all Tier 1 tools now in services/, thin wrappers in main.py"
+
+  - id: "008"
+    title: "Application Events & Change Correlation (list_application_events)"
+    category: "Triage"
+    priority: "High"
+    status: "Planned"
+    impact: "Surfaces deploy markers, config changes, and agent restart patterns directly in triage — eliminates the need to infer change from metric inflection points. Wires include_deploys in correlate_incident_window so every first-pass call includes change context. Reduces MTTx and AI token cost by front-loading the highest-signal diagnostic question: what changed?"
+    estimated_hours: 8
+    actual_hours: null
+    completion_percentage: 0
+    completion_date: null
+    dependencies:
+      - yaml_id: "001"
+        note: "Requires AppDClient and base tool pattern"
+      - yaml_id: "007"
+        note: "list_application_events is a VIEW-tier tool; permission sets already wired"
+    technical_summary: |
+      Three-part build:
+
+      1. AppDClient.get_application_events(app_name, start_ms, end_ms, event_types) — calls
+         GET /controller/rest/applications/{appId}/events with BETWEEN_TIMES range and
+         comma-separated event types (APPLICATION_DEPLOYMENT, AGENT_EVENT,
+         APPLICATION_CONFIG_CHANGE, APP_SERVER_RESTART).
+
+      2. services/event_analyzer.py — fetches events then applies heuristics to produce
+         structured change_indicators alongside raw events:
+           - explicit_deploy_marker: APPLICATION_DEPLOYMENT event present (HIGH always)
+           - probable_rolling_deploy: ≥2 nodes in same tier with AGENT_RESTART within 10 min;
+             HIGH if ≥50% of tier nodes affected, MEDIUM otherwise
+           - k8s_pod_turnover: AGENT_DISCONNECT + AGENT_CONNECT pairs on different node names
+             in same tier within 10 min; HIGH if ≥2 pairs (K8s rolling update pattern)
+           - config_change: APPLICATION_CONFIG_CHANGE event (HIGH)
+           - single_node_restart: 1 node restart with no tier pattern (LOW — ambiguous)
+         Returns: raw_events (capped 50), change_indicators list, change_summary string,
+         has_changes bool.
+
+      3. Wire include_deploys in incident_correlator.py (currently a None placeholder at
+         line 220) — call event_analyzer.run() in the optional parallel pass alongside
+         infra/network. Add change_indicators to the timeline. Prepend to triage_summary:
+         "1 probable rolling deploy at 14:32 in checkout-service (5/6 nodes), ...".
+         Change include_deploys default to True (single lightweight read, worst case empty).
+
+      Standalone list_application_events tool: full event_analyzer output including raw
+      events, for targeted post-mortem or wider look-back queries outside the incident flow.
+      Permission tier: VIEW. Token budget: 1500.
+    deliverables:
+      - "client/appd_client.py — get_application_events() method"
+      - "services/event_analyzer.py — heuristics: rolling_deploy, k8s_pod_turnover, config_change, explicit_marker"
+      - "services/incident_correlator.py — wire include_deploys, add change_indicators to timeline and triage_summary, default True"
+      - "main.py — list_application_events tool (VIEW tier, 1500 token budget)"
+      - "auth/appd_auth.py — add list_application_events to _VIEW_TOOLS"
+      - "tests/unit/test_permissions.py — add list_application_events to ALL_TOOLS and VIEW assertions"
+      - "tests/unit/test_event_analyzer.py — unit tests for each heuristic + correlator integration"
+    success_criteria:
+      - "list_application_events returns raw_events + change_indicators for a real time window"
+      - "Rolling deploy heuristic: ≥2 nodes same tier within 10 min → probable_rolling_deploy"
+      - "K8s pod turnover: DISCONNECT+CONNECT pairs on new node names → k8s_pod_turnover HIGH"
+      - "include_deploys=True in correlate_incident_window prepends change context to triage_summary"
+      - "Empty event list returns has_changes=False with no change_indicators (no false positives)"
+      - "Single node restart labelled LOW confidence (ambiguous — not asserted as deploy)"
+      - "All existing 330 tests still pass"
 
 # Project Statistics
 statistics:
-  total_enhancements: 7
-  completed: 6
+  total_enhancements: 8
+  completed: 7
   in_progress: 0
-  planned: 1
-  completion_percentage: 86
-  total_estimated_hours: 44
-  total_actual_hours: 34
+  planned: 2
+  completion_percentage: 75
+  total_estimated_hours: 52
+  total_actual_hours: 46
 
 # Open Items
 open_items:
   - "ENH-003: Claude Desktop & Cursor integration testing — blocked on real AppD controller credentials"
-  - "SCALE-06 (partial): Per-team OAuth tokens for defense-in-depth at AppD API layer — deferred; complex Vault topology change. User-facing concern solved by ENH-007 (per-user RBAC scoping); audit team attribution fixed 2026-04-17"
+  - "ENH-008: list_application_events + include_deploys wiring — planned, ready to implement"
   - "CONC-03: Multi-worker shared state via Redis (rate limiter buckets, RBAC cache, session roles) — deferred; single process handles <200 concurrent users; Redis adds infra overhead not yet justified"
 
 # Notes

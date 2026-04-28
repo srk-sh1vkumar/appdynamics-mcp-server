@@ -169,6 +169,8 @@ class ControllerConfig:
     timezone: str
     app_package_prefix: str
     analytics_url: str
+    vault_path: str = ""        # enterprise: vault path for data account creds
+    rbac_vault_path: str = ""   # enterprise: vault path for RBAC admin creds
 
 
 # ---------------------------------------------------------------------------
