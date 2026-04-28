@@ -55,7 +55,7 @@ from parsers.snapshot_parser import score_golden_candidate
 from registries.apps_registry import AppEntry, AppsRegistry
 from registries.bt_registry import BTEntry, BTRegistry
 from registries.golden_registry import GoldenRegistry, GoldenSnapshot
-from services import bt_classifier, bt_naming, incident_correlator, license_check, runbook_generator, snapshot_analyzer, snapshot_comparator, team_health, trace_stitcher, user_resolver
+from services import bt_classifier, bt_naming, event_analyzer, incident_correlator, license_check, runbook_generator, snapshot_analyzer, snapshot_comparator, team_health, trace_stitcher, user_resolver
 from services import health as health_svc
 from services.cache_invalidator import CacheInvalidator
 from utils import cache as cache_mod
@@ -99,6 +99,7 @@ DEFAULT_CONTROLLER = os.environ.get("DEFAULT_CONTROLLER", "production")
 TOKEN_BUDGETS: dict[str, int] = {
     "correlate_incident_window": 3000,
     "get_team_health_summary": 2500,
+    "list_application_events": 1500,
     "stitch_async_trace": 1500,
     "analyze_snapshot": 2000,
     "compare_snapshots": 2000,
@@ -2279,6 +2280,75 @@ async def startup() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Tool: list_application_events (change correlation — VIEW tier)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def list_application_events(
+    app_name: str,
+    start_time_ms: int,
+    end_time_ms: int,
+    controller_name: str = "production",
+    event_types: list[str] | None = None,
+    upn: str = "dev@local",
+) -> str:
+    """Fetch application events for a time window and apply change-correlation heuristics.
+
+    Returns raw events (capped at 50) plus structured change_indicators that
+    identify probable deploy patterns without requiring an explicit deploy marker:
+
+    - explicit_deploy_marker: APPLICATION_DEPLOYMENT event present (HIGH confidence)
+    - config_change: APPLICATION_CONFIG_CHANGE event (HIGH confidence)
+    - probable_rolling_deploy: ≥2 nodes in same tier restarted within 10 min
+      (HIGH if ≥50% of tier nodes, MEDIUM otherwise)
+    - k8s_pod_turnover: DISCONNECT + CONNECT pairs on different node names in same
+      tier within 10 min — K8s rolling update fingerprint (HIGH if ≥2 pairs)
+    - single_node_restart: 1 isolated node restart with no tier pattern (LOW — ambiguous)
+
+    Use this tool for targeted post-mortem look-back or to establish change context
+    before drilling into metrics or snapshots. For first-pass triage, prefer
+    correlate_incident_window (which includes events automatically via include_deploys).
+
+    Args:
+        app_name: AppDynamics application name.
+        start_time_ms: Window start as Unix milliseconds.
+        end_time_ms: Window end as Unix milliseconds.
+        controller_name: Controller to query (default: "production").
+        event_types: Event types to fetch. Defaults to APPLICATION_DEPLOYMENT,
+            AGENT_EVENT, APPLICATION_CONFIG_CHANGE, APP_SERVER_RESTART.
+        upn: Caller identity for RBAC and audit logging.
+    """
+    rate_msg = await check_and_wait(upn, "list_application_events")
+    role = await _get_role(upn, controller_name)
+    require_permission(role, "list_application_events")
+    await _require_app_access(upn, controller_name, app_name)
+
+    start = time.monotonic()
+    status = "ok"
+    try:
+        client = get_client(controller_name)
+        result = await event_analyzer.run(
+            client=client,
+            app_name=app_name,
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            event_types=event_types,
+        )
+        output = truncate_to_budget(sanitize_and_wrap(result), "list_application_events")
+        return (rate_msg + "\n" + output) if rate_msg else output
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        audit_log(
+            "list_application_events", upn, role.value,
+            {"app_name": app_name, "start_time_ms": start_time_ms, "end_time_ms": end_time_ms},
+            controller_name, int((time.monotonic() - start) * 1000), status,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tool: correlate_incident_window (composite triage — separate module)
 # ---------------------------------------------------------------------------
 
@@ -2290,7 +2360,7 @@ async def correlate_incident_window(
     end_time_ms: int,
     controller_name: str = "production",
     scope: str | None = None,
-    include_deploys: bool = False,
+    include_deploys: bool = True,
     include_network: bool = False,
     include_security: bool = False,
     include_infra: bool = False,

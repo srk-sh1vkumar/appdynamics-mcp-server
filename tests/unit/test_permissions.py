@@ -61,6 +61,8 @@ ALL_TOOLS: frozenset[str] = frozenset({
     "get_team_health_summary",
     # Composite triage
     "correlate_incident_window",
+    # Application events / change correlation
+    "list_application_events",
 })
 
 
@@ -132,7 +134,7 @@ class TestToolTierPlacement:
     @pytest.mark.parametrize("tool", [
         "list_controllers", "list_applications", "get_metrics",
         "get_health_violations", "get_infrastructure_stats", "get_tiers_and_nodes",
-        "get_team_health_summary", "get_server_health",
+        "get_team_health_summary", "get_server_health", "list_application_events",
     ])
     def test_view_tool_in_view_set(self, tool):
         assert tool in _VIEW_TOOLS, f"{tool} should be in VIEW"

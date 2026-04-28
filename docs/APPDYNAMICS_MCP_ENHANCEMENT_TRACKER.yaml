@@ -309,12 +309,12 @@ enhancements:
     title: "Application Events & Change Correlation (list_application_events)"
     category: "Triage"
     priority: "High"
-    status: "Planned"
+    status: "Complete"
     impact: "Surfaces deploy markers, config changes, and agent restart patterns directly in triage — eliminates the need to infer change from metric inflection points. Wires include_deploys in correlate_incident_window so every first-pass call includes change context. Reduces MTTx and AI token cost by front-loading the highest-signal diagnostic question: what changed?"
     estimated_hours: 8
-    actual_hours: null
-    completion_percentage: 0
-    completion_date: null
+    actual_hours: 4
+    completion_percentage: 100
+    completion_date: "2026-04-27"
     dependencies:
       - yaml_id: "001"
         note: "Requires AppDClient and base tool pattern"
@@ -365,21 +365,27 @@ enhancements:
       - "Empty event list returns has_changes=False with no change_indicators (no false positives)"
       - "Single node restart labelled LOW confidence (ambiguous — not asserted as deploy)"
       - "All existing 330 tests still pass"
+    completion_notes: |
+      Delivered 2026-04-27. All 5 heuristics implemented in services/event_analyzer.py
+      (_analyze). include_deploys default changed to True in both incident_correlator.run()
+      and the correlate_incident_window MCP tool. change_indicators added to timeline;
+      change_summary prepended to triage_summary when has_changes=True. 26 new tests in
+      tests/unit/test_event_analyzer.py. Total test count: 406 (up from 330), 0 failures.
+      Tool count: 36 (up from 35).
 
 # Project Statistics
 statistics:
   total_enhancements: 8
-  completed: 7
+  completed: 8
   in_progress: 0
-  planned: 2
-  completion_percentage: 75
+  planned: 1
+  completion_percentage: 88
   total_estimated_hours: 52
-  total_actual_hours: 46
+  total_actual_hours: 50
 
 # Open Items
 open_items:
   - "ENH-003: Claude Desktop & Cursor integration testing — blocked on real AppD controller credentials"
-  - "ENH-008: list_application_events + include_deploys wiring — planned, ready to implement"
   - "CONC-03: Multi-worker shared state via Redis (rate limiter buckets, RBAC cache, session roles) — deferred; single process handles <200 concurrent users; Redis adds infra overhead not yet justified"
 
 # Notes

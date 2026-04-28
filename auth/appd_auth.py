@@ -238,7 +238,7 @@ _VIEW_TOOLS: frozenset[str] = frozenset({
     "get_eum_geo_performance", "get_infrastructure_stats",
     "get_jvm_details", "get_network_kpis", "get_server_health",
     "get_tiers_and_nodes", "get_agent_status", "get_bt_detection_rules",
-    "get_team_health_summary",
+    "get_team_health_summary", "list_application_events",
 })
 
 _TROUBLESHOOT_TOOLS: frozenset[str] = _VIEW_TOOLS | frozenset({

@@ -20,6 +20,7 @@ import asyncio
 import math
 from typing import Any
 
+from services import event_analyzer
 from utils.timezone import epoch_ms_to_utc
 
 
@@ -48,7 +49,7 @@ async def run(
     end_time_ms: int,
     controller_name: str = "production",
     scope: str | None = None,
-    include_deploys: bool = False,
+    include_deploys: bool = True,
     include_network: bool = False,
     include_security: bool = False,
     include_infra: bool = False,
@@ -117,6 +118,17 @@ async def run(
             elif label.startswith("network:"):
                 network_results.append({"tier": tier_name, "kpis": val if not _is_error(val) else None, "error": val.get("_error") if _is_error(val) else None})
 
+    # ── Deploy / change-event pass (lightweight; runs even when optional_coros empty) ──
+    deploy_result: dict[str, Any] | None = None
+    if include_deploys:
+        tier_node_counts = {t.get("name", ""): t.get("numberOfNodes", 0) for t in tiers}
+        deploy_result = await _safe(
+            event_analyzer.run(client, app_name, start_time_ms, end_time_ms, tier_node_counts=tier_node_counts),
+            "event_analyzer",
+        )
+        if _is_error(deploy_result):
+            deploy_result = {"change_summary": deploy_result.get("_error", "error"), "has_changes": False, "change_indicators": [], "raw_events": [], "event_count": 0}
+
     # ── Build timeline ────────────────────────────────────────────────────
     timeline: list[dict[str, Any]] = []
 
@@ -139,6 +151,18 @@ async def run(
             "severity": "ERROR",
             "description": f"BT {s.get('businessTransactionId', '?')} — {s.get('errorSummary', s.get('summary', 'error'))}",
         })
+
+    if deploy_result:
+        for ci in deploy_result.get("change_indicators", []):
+            ts = ci.get("first_time_ms", 0)
+            timeline.append({
+                "time_ms": ts,
+                "time_utc": epoch_ms_to_utc(ts).isoformat() if ts else "unknown",
+                "type": "change_indicator",
+                "severity": "INFO",
+                "confidence": ci.get("confidence", "UNKNOWN"),
+                "description": ci.get("detail", ci.get("type", "change")),
+            })
 
     timeline.sort(key=lambda e: e.get("time_ms") or 0)
 
@@ -168,6 +192,7 @@ async def run(
         "network_included": include_network,
         "security_included": include_security,
         "deploys_included": include_deploys,
+        "change_indicators_count": len(deploy_result.get("change_indicators", [])) if deploy_result else 0,
     }
 
     # ── Triage summary (one-liner for the model) ──────────────────────────
@@ -194,6 +219,9 @@ async def run(
         + "."
     )
 
+    if deploy_result and deploy_result.get("has_changes"):
+        triage_summary = deploy_result["change_summary"] + " | " + triage_summary
+
     return {
         "app_name": app_name,
         "controller_name": controller_name,
@@ -217,6 +245,6 @@ async def run(
         "infra": infra_results if include_infra else None,
         "network": network_results if include_network else None,
         "security": None,   # placeholder — wire to analytics query when include_security=True
-        "deploys": None,    # placeholder — wire to deployment event API when include_deploys=True
+        "deploys": deploy_result if include_deploys else None,
         "signals_summary": signals_summary,
     }
