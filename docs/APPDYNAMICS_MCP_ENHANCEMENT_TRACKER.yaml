@@ -373,15 +373,33 @@ enhancements:
       tests/unit/test_event_analyzer.py. Total test count: 406 (up from 330), 0 failures.
       Tool count: 36 (up from 35).
 
+  - id: "009"
+    title: "Documentation Sync — README, REQUIREMENTS, and System Prompt"
+    category: "Documentation"
+    priority: "Medium"
+    status: "Complete"
+    impact: "Ensures README, REQUIREMENTS.md, and MCP system prompt accurately reflect the dual-mode architecture, all 36 tools, and the updated investigation sequence. Eliminates stale references to single-user-only setup and 29-tool count."
+    estimated_hours: 1
+    actual_hours: 1
+    completion_percentage: 100
+    completion_date: "2026-04-28"
+    deliverables:
+      - "README.md — rewritten for dual-mode: single_user quickstart, enterprise/Vault setup, all 36 tools in structured table, permission tiers, updated troubleshooting guide"
+      - "docs/REQUIREMENTS.md — version 1.3: tool count 29→36, test count 247→406, STEP 0 (correlate_incident_window) added to investigation sequence, Section 7.0 for triage tools, permission table corrected, token budget table completed, file structure updated with all services/ modules"
+      - "main.py SYSTEM_PROMPT — include_deploys=True default documented, list_application_events added to OPTIONAL section, confidence-level key (HIGH/MEDIUM/LOW) for change_indicators"
+    completion_notes: |
+      Delivered 2026-04-28. All three documents now reflect the state after ENH-007 and ENH-008.
+      Committed as ed9b0d2 and f93a8e1 on feature/dual-mode-rbac, included in PR #1.
+
 # Project Statistics
 statistics:
-  total_enhancements: 8
-  completed: 8
+  total_enhancements: 9
+  completed: 9
   in_progress: 0
   planned: 1
-  completion_percentage: 88
-  total_estimated_hours: 52
-  total_actual_hours: 50
+  completion_percentage: 90
+  total_estimated_hours: 53
+  total_actual_hours: 51
 
 # Open Items
 open_items:
