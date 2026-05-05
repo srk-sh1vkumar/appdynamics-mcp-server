@@ -619,6 +619,41 @@ class AppDClient:
         return result if isinstance(result, list) else []
 
     # ------------------------------------------------------------------
+    # Application Events
+    # ------------------------------------------------------------------
+
+    async def get_application_events(
+        self,
+        app_name: str,
+        start_time_ms: int,
+        end_time_ms: int,
+        event_types: list[str] | None = None,
+    ) -> list[Any]:
+        """Fetch application events for a time window using BETWEEN_TIMES range.
+
+        Default event_types covers the signals most useful for change correlation.
+        """
+        encoded = quote(app_name, safe="")
+        types = event_types or [
+            "APPLICATION_DEPLOYMENT",
+            "AGENT_EVENT",
+            "APPLICATION_CONFIG_CHANGE",
+            "APP_SERVER_RESTART",
+        ]
+        params: dict[str, Any] = {
+            "time-range-type": "BETWEEN_TIMES",
+            "start-time": start_time_ms,
+            "end-time": end_time_ms,
+            "event-types": ",".join(types),
+            "severities": "INFO,WARN,ERROR",
+        }
+        result = await self._get(
+            f"/controller/rest/applications/{encoded}/events",
+            params=params,
+        )
+        return result if isinstance(result, list) else []
+
+    # ------------------------------------------------------------------
     # User lookup (used by auth.get_user_role)
     # ------------------------------------------------------------------
 

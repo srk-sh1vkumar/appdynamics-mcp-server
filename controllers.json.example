@@ -1,0 +1,13 @@
+{
+  "controllers": [
+    {
+      "name": "production",
+      "url": "https://your-account.saas.appdynamics.com",
+      "account": "your-account-name",
+      "globalAccount": "your-global-account-name",
+      "timezone": "UTC",
+      "appPackagePrefix": "com.yourcompany",
+      "analyticsUrl": "https://analytics.api.appdynamics.com"
+    }
+  ]
+}
